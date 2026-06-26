@@ -6,9 +6,11 @@ set -e
 
 TARGET="${1:-.}"
 SCRIPT_DIR="$(cd "$(dirname "$0")/.." && pwd)"
+mkdir -p "$TARGET"
+TARGET_DIR="$(cd "$TARGET" && pwd)"
 
 echo "=== STDD×VDD Init ==="
-echo "Target: $TARGET"
+echo "Target: $TARGET_DIR"
 echo "Template: $SCRIPT_DIR"
 echo ""
 
@@ -39,9 +41,37 @@ fi
 
 echo "[P1] 完成"
 
+# P1b: Agent 入口文件
+echo "[P1b] 複製 agent 入口文件..."
+if [ "$TARGET_DIR" = "$SCRIPT_DIR" ]; then
+  echo "  Template repo 內執行，文件已在正確位置"
+else
+  if [ ! -f "$TARGET/CLAUDE.md" ] && [ -f "$SCRIPT_DIR/CLAUDE.md" ]; then
+    cp "$SCRIPT_DIR/CLAUDE.md" "$TARGET/CLAUDE.md"
+    echo "  Copied CLAUDE.md"
+  elif [ -f "$TARGET/CLAUDE.md" ]; then
+    cp "$SCRIPT_DIR/CLAUDE.md" "$TARGET/CLAUDE.stdd-vdd.md"
+    echo "  CLAUDE.md 已存在，Copied CLAUDE.stdd-vdd.md for merge"
+  fi
+
+  if [ -d "$SCRIPT_DIR/docs" ]; then
+    mkdir -p "$TARGET/docs"
+    cp "$SCRIPT_DIR/docs/"*.md "$TARGET/docs/"
+    echo "  Copied docs/*.md"
+  fi
+
+  mkdir -p "$TARGET/setup/templates"
+  cp "$SCRIPT_DIR/setup/AGENT_SETUP_PROTOCOL.md" "$TARGET/setup/"
+  cp "$SCRIPT_DIR/setup/templates/"*.json "$TARGET/setup/templates/"
+  echo "  Copied setup/AGENT_SETUP_PROTOCOL.md and templates"
+fi
+echo "[P1b] 完成"
+
 # P2: Hook Scripts
 echo "[P2] 複製 hook scripts..."
-if [ -d "$SCRIPT_DIR/.claude/hooks" ]; then
+if [ "$TARGET_DIR" = "$SCRIPT_DIR" ]; then
+  echo "  Template repo 內執行，hooks 已在正確位置"
+elif [ -d "$SCRIPT_DIR/.claude/hooks" ]; then
   cp "$SCRIPT_DIR/.claude/hooks/"*.py "$TARGET/.claude/hooks/"
   chmod +x "$TARGET/.claude/hooks/"*.py
   echo "  Copied 6 hook scripts"
@@ -52,7 +82,9 @@ echo "[P2] 完成"
 
 # P3: Hook 設定
 echo "[P3] 複製 settings.json..."
-if [ ! -f "$TARGET/.claude/settings.json" ] && [ -f "$SCRIPT_DIR/.claude/settings.json" ]; then
+if [ "$TARGET_DIR" = "$SCRIPT_DIR" ]; then
+  echo "  Template repo 內執行，settings.json 已在正確位置"
+elif [ ! -f "$TARGET/.claude/settings.json" ] && [ -f "$SCRIPT_DIR/.claude/settings.json" ]; then
   cp "$SCRIPT_DIR/.claude/settings.json" "$TARGET/.claude/settings.json"
   echo "  Copied settings.json"
 elif [ -f "$TARGET/.claude/settings.json" ]; then
@@ -62,7 +94,9 @@ echo "[P3] 完成"
 
 # P4: Subagent
 echo "[P4] 複製 red-verifier subagent..."
-if [ ! -f "$TARGET/.claude/agents/red-verifier.md" ] && \
+if [ "$TARGET_DIR" = "$SCRIPT_DIR" ]; then
+  echo "  Template repo 內執行，red-verifier.md 已在正確位置"
+elif [ ! -f "$TARGET/.claude/agents/red-verifier.md" ] && \
    [ -f "$SCRIPT_DIR/.claude/agents/red-verifier.md" ]; then
   cp "$SCRIPT_DIR/.claude/agents/red-verifier.md" "$TARGET/.claude/agents/"
   echo "  Copied red-verifier.md"

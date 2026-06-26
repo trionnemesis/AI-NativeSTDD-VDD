@@ -27,13 +27,11 @@ for pattern, label in weakening_patterns:
 
 if violations:
     print(
-        f"WARNING [GATE:RED invariant]: {path} 疑似測試弱化 pattern:\n"
+        f"BLOCKED [GATE:RED invariant]: {path} 疑似測試弱化 pattern:\n"
         f"  {', '.join(violations)}\n"
-        f"  此變更需獨立 Review。\n"
-        f"  若要升級為 block，將 sys.exit(0) 改為 sys.exit(2)。",
+        f"  禁止弱化/跳過/空斷言測試。",
         file=sys.stderr
     )
-    # 警告而非 block，語意弱化判定需 LLM 補充
-    # 如要 block 改為 sys.exit(2)
+    sys.exit(2)
 
 sys.exit(0)
