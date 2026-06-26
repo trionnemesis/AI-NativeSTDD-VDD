@@ -184,7 +184,19 @@ pip install pact-python
 
 ---
 
-### P6：MCP Oracle Server（選用）
+### P6：Smoke Test（驗證 gate 有效）
+
+```bash
+# 在 .vdd/phase = INIT 時，嘗試 Edit src/ 應被 block
+echo '{"tool_name":"Edit","tool_input":{"file_path":"src/test.py"}}' | \
+  python3 .claude/hooks/pre_impl_gate.py 2>&1; echo "exit: $?"
+```
+
+預期結果：stderr 顯示 `BLOCKED [GATE:SPEC]` 或 `BLOCKED [GATE:RED]`，且 exit code = 2。
+
+---
+
+### P7：MCP Oracle Server（選用）
 
 `.mcp.json`（專案根目錄）：
 

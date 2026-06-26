@@ -104,13 +104,14 @@ python3 -c "import pytest_cov" 2>/dev/null && echo "OK: pytest-cov" || echo "MIS
 # 在 .vdd/phase = INIT 的狀態下，嘗試寫 src/ 應被 hook 阻擋
 
 # 建立測試環境
-mkdir -p /tmp/stdd-test/src
+mkdir -p /tmp/stdd-test/src /tmp/stdd-test/.vdd
 echo "INIT" > /tmp/stdd-test/.vdd/phase
 cp .claude/hooks/pre_impl_gate.py /tmp/stdd-test/
 
 # 模擬 hook 輸入（Edit tool 到 src/test.py）
+cd /tmp/stdd-test
 echo '{"tool_name":"Edit","tool_input":{"file_path":"src/test.py"}}' | \
-  python3 .claude/hooks/pre_impl_gate.py 2>&1; echo "exit: $?"
+  python3 pre_impl_gate.py 2>&1; echo "exit: $?"
 # 預期輸出: BLOCKED: ... 且 exit code = 2
 ```
 
