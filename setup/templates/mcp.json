@@ -1,0 +1,11 @@
+{
+  "mcpServers": {
+    "oracle": {
+      "type": "stdio",
+      "command": "python3",
+      "args": [".claude/oracle/server.py"],
+      "env": {},
+      "description": "STDD×VDD Oracle — 查詢 specs、Red Evidence、Traceability"
+    }
+  }
+}

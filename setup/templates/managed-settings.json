@@ -1,0 +1,21 @@
+{
+  "permissions": {
+    "defaultMode": "plan",
+    "deny": [
+      "Edit(./spec/**)",
+      "Edit(./specs/**)",
+      "Edit(./.git/**)",
+      "Edit(./.claude/hooks/**)",
+      "Bash(curl *)",
+      "Bash(wget *)",
+      "Agent(*)"
+    ]
+  },
+  "disableAutoMode": "disable",
+  "disableBypassPermissionsMode": "disable",
+  "allowManagedPermissionRulesOnly": true,
+  "allowManagedHooksOnly": true,
+  "env": {
+    "CLAUDE_CODE_STOP_HOOK_BLOCK_CAP": "20"
+  }
+}

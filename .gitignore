@@ -1,0 +1,34 @@
+# Python
+__pycache__/
+*.py[cod]
+*.pyo
+*.pyd
+.Python
+*.egg-info/
+dist/
+build/
+.venv/
+venv/
+.env
+
+# Test & Coverage
+.coverage
+coverage.json
+.pytest_cache/
+htmlcov/
+.mutmut-cache
+
+# VDD runtime state
+# (vdd/red/ 和 vdd/phase 應 commit，記錄治理狀態)
+# 但排除臨時快取
+.vdd/*.tmp
+
+# IDE
+.DS_Store
+.idea/
+.vscode/
+*.swp
+*.swo
+
+# Logs
+*.log
