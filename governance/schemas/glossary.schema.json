@@ -1,0 +1,19 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://github.com/trionnemesis/AI-NativeSTDD-VDD/governance/schemas/glossary.schema.json",
+  "title": "Canonical glossary",
+  "type": "object",
+  "minProperties": 1,
+  "additionalProperties": {
+    "type": "object",
+    "required": ["stable_id", "canonical_term", "operational_meaning"],
+    "properties": {
+      "stable_id": {"type": "string", "pattern": "^(TERM|GATE):[A-Z0-9][A-Z0-9_-]*$"},
+      "canonical_term": {"type": "string", "minLength": 1},
+      "operational_meaning": {"type": "string", "minLength": 1},
+      "surface_tokens": {"type": "array", "items": {"type": "string"}},
+      "is_not": {"type": "array", "items": {"type": "string"}},
+      "scope_note": {"type": "string"}
+    }
+  }
+}

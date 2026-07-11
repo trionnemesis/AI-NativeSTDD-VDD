@@ -1,0 +1,20 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://github.com/trionnemesis/AI-NativeSTDD-VDD/governance/schemas/namespace-registry.schema.json",
+  "title": "Stable ID namespace registry",
+  "type": "object",
+  "required": ["conventions", "namespaces"],
+  "properties": {
+    "conventions": {"type": "object"},
+    "namespaces": {
+      "type": "object",
+      "minProperties": 1,
+      "propertyNames": {"pattern": "^[A-Z][A-Z0-9_]*$"},
+      "additionalProperties": {
+        "type": "object",
+        "required": ["kind", "defined_in", "example"]
+      }
+    }
+  },
+  "additionalProperties": false
+}

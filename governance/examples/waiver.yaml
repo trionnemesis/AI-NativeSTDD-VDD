@@ -1,0 +1,13 @@
+waiver_id: "WAIVER:2026:001"
+policy_id: "<policy or assertion>"
+scope: { change_ids: [], services: [] }
+reason: "<specific reason>"
+risk_statement: "<accepted risk>"
+compensating_controls: []
+requested_by: "<actor>"
+approved_by: "<independent owner>"
+starts_at: "YYYY-MM-DD"
+expires_at: "YYYY-MM-DD"
+review_trigger: "<event or date>"
+evidence_ids: []
+status: "active | expired | revoked"

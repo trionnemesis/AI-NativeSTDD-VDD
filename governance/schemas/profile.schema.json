@@ -1,0 +1,13 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://github.com/trionnemesis/AI-NativeSTDD-VDD/governance/schemas/profile.schema.json",
+  "title": "System or change profile registry",
+  "type": "object",
+  "required": ["stable_id", "profile_kind", "profiles"],
+  "properties": {
+    "stable_id": {"enum": ["TERM:SYSTEM-PROFILE", "TERM:CHANGE-PROFILE"]},
+    "profile_kind": {"enum": ["system", "change"]},
+    "profiles": {"type": "object", "minProperties": 1}
+  },
+  "additionalProperties": false
+}

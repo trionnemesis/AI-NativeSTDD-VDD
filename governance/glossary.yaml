@@ -1,0 +1,249 @@
+# Shadow copy extracted from the Notion root Canonical Glossary on 2026-07-11.
+# Authority remains Notion until MCR:2026:004 cutover is explicitly approved.
+
+STDD:
+  stable_id: TERM:STDD
+  canonical_term: "Specification & Test-Driven Development"
+  surface_tokens: [STDD]
+  operational_meaning: >-
+    以 Canonical Spec + Test 作為硬約束,限制 AI 實作範圍;
+    實作不得超出 spec 與測試界定的行為集合。
+
+VDD:
+  stable_id: TERM:VDD
+  canonical_term: "Verification & Validation-Driven Development"
+  preferred_token: "V&V-DD"
+  surface_tokens: [VDD, "V&V-DD"]
+  operational_meaning: >-
+    功能通過驗收(Green)後,於 pre-Deploy 對品質屬性
+    (performance / reliability / security / resilience)
+    執行 machine-checkable gate；部署後以 Production Telemetry
+    對 operational quality assumptions 做最終實環境驗證。
+    可執行 gate 規格: GATE:VDD(見 05 頁)。
+  is_not:
+    - "Value-Driven Development（價值／優先級排序）— 不在本文件語意內"
+    - "Vulnerability-Driven Development（資安漏洞驅動）"
+  scope_note: >-
+    本 loop 的 agent 不負責 value／prioritization;VDD 純為品質驗證層,
+    與「該不該做、先做什麼」無關。
+    Production Telemetry 是 operational quality assumptions 的最終實環境驗證來源；
+    security／privacy／authorization／compliance 不得以「未觀測到事件」作為唯一成立證據，仍須多源 evidence 與獨立裁決。
+  authority_boundary: >-
+    Production Telemetry 是 performance／reliability／resilience／user-impact
+    假設的最終實環境驗證來源；不是 security／privacy／authorization／compliance
+    的唯一證明，後者仍需 policy、design review、scan、attestation 與人工裁決。
+
+DDD:
+  stable_id: TERM:DDD
+  canonical_term: Domain-Driven Design
+  operational_meaning: 定義業務邊界、ubiquitous language 與不變條件 invariants。
+
+BDD:
+  stable_id: TERM:BDD
+  canonical_term: Behavior-Driven Development
+  operational_meaning: 以 Given-When-Then 定義使用者可觀察行為與驗收情境。
+
+DI:
+  stable_id: TERM:DI
+  canonical_term: Dependency Injection
+  operational_meaning: 讓依賴可替換、元件可隔離、測試可成立。
+
+UI_State_Contract:
+  stable_id: TERM:UI-STATE
+  canonical_term: UI State Contract
+  operational_meaning: 補足 Loading／Error／Empty／Disabled 等互動狀態契約。
+
+SIGNAL:
+  stable_id: TERM:SIGNAL
+  canonical_term: "Discovery Signal"
+  surface_tokens: [signal]
+  operational_meaning: >-
+    來自 CI／Production Telemetry／SCA·CVE／dependency／drift／人工 issue 的原始事件;
+    必含 fingerprint。為 Change Intent 的 upstream 觸發源,實例命名空間 SIG:(見 14)。
+
+ADMISSION:
+  stable_id: TERM:ADMISSION
+  canonical_term: "Admission Control"
+  surface_tokens: [admission]
+  operational_meaning: >-
+    把 triaged signal 升級為 Change Intent 前的 deterministic 准入裁決;
+    可執行契約 GATE:ADMIT(見 14)。LLM 不得為唯一裁決者。
+
+AUTONOMY_TIER:
+  stable_id: TERM:AUTONOMY-TIER
+  canonical_term: "Autonomy Tier"
+  surface_tokens: [tier, T1, T2, T3]
+  operational_meaning: >-
+    任務可自動化程度的 deterministic 分級。T1=auto-PR;T2=auto-PR+強制 human review;
+    T3=須人工撰寫 Change Intent、禁止 auto-dispatch。映射與 enforcement 見 14。
+
+DISPATCH:
+  stable_id: TERM:DISPATCH
+  canonical_term: "Dispatch Assignment"
+  surface_tokens: [dispatch]
+  operational_meaning: "subagent role x worktree(WT:) x budget(time／token cap) 的派工綁定。"
+
+WORKTREE_ISO:
+  stable_id: TERM:WORKTREE-ISO
+  canonical_term: "Worktree Isolation (Plane A)"
+  surface_tokens: ["worktree isolation", "plane A"]
+  operational_meaning: >-
+    repo 內寫入邊界。Claude Code agents view 對每個 subagent 配獨立 git worktree
+    + worktree-isolation guard。屬 correctness／blast-radius 邊界,非安全邊界。
+
+SANDBOX_ISO:
+  stable_id: TERM:SANDBOX-ISO
+  canonical_term: "Sandbox Isolation (Plane B)"
+  surface_tokens: ["sandbox isolation", "plane B"]
+  operational_meaning: >-
+    OS 級 FS／network 邊界(bubblewrap／seatbelt)。process 級、非 per-subagent:
+    subagent 與 parent 共用同一 sandbox profile。per-role 安全切分需外層 runner／container。
+
+OOB_ATTEST:
+  stable_id: TERM:OOB-ATTEST
+  canonical_term: "Out-of-Band Attestation"
+  surface_tokens: [attestation, OOB]
+  operational_meaning: >-
+    在 agent 控制平面之外執行的 deterministic 檢查,產生不可由 agent 自證偽造的證據;
+    用於 worktree 寫入驗證與 sandbox policy 快照。為 GATE:VDD machine-checkable 哲學的延伸。
+
+TIA:
+  stable_id: TERM:TIA
+  canonical_term: "Test Impact Analysis"
+  preferred_token: "Test Impact Analysis"
+  surface_tokens: [TIA, "Test Impact Analysis"]
+  operational_meaning: >-
+    一次變更後,沿 Spec->BDD->Test 的 Stable ID traceability,
+    挑出受影響、值得在本次 CI 迴圈執行的測試子集(selected tests),縮短 GATE:GREEN 回饋時間。
+    屬交付效率層,落在 GATE:GREEN 內部;非獨立 Gate、不改 07 canonical 序列。
+    被略過測試由 nightly Full Regression 兜底。成熟度位階=L4(加速驗證),先於 13 Self-Healing 之 L5。主定義頁見 15。
+  is_not:
+    - "Testing Methodology(不取代 TDD/BDD/VDD;它選測,不設計測試)"
+    - "品質工具(不提升正確性,只縮短驗證時間;品質權威仍是 GATE:VDD / 06 / 原則6)"
+    - "03 的「Impact Analysis」(那是 Spec/變更影響分析=哪些規格/模組受影響)"
+    - "admission gate(不在 14 GATE:ADMIT 裁決鏈中)"
+    - "test healing(13 Healer 改測試;TIA 只選要跑的既有測試,不動 assertion/locator/內容)"
+    - "獨立 Gate(不存在 GATE:TIA)"
+  scope_note: >-
+    TIA 不得削減 06 的 Red Evidence／Impl≠test 權限隔離／Mutation,也不得弱化 GATE:VDD(原則 3、5)。
+    長期把有失敗能力的測試排除於 nightly 之外=弱化覆蓋,依原則 5 reject。選測決策(無論是否 LLM 產生)非唯一品質權威。
+
+GOLDEN_TASK:
+  stable_id: TERM:GOLDEN-TASK
+  canonical_term: "Golden Task"
+  surface_tokens: ["golden task"]
+  operational_meaning: >-
+    版本化的 agent workflow 評測任務(輸入 + 預期行為 + oracle 綁定),
+    用於 prompt／routing／memory strategy／tool policy／model 換版後的可重複 regression 評測。
+    artifact(golden_tasks.jsonl + replay script)落於 repo;Notion 僅存契約與 schema(見 18)。
+  is_not:
+    - "產品功能測試(那是 GATE:RED／GREEN 的物件;golden task 的被測物=agent 系統組態本身)"
+    - "一次性 benchmark(必須版本化、可回放、可比較 baseline)"
+
+GATE_REGRESSION:
+  stable_id: GATE:REGRESSION
+  canonical_term: "Agent Regression Gate"
+  surface_tokens: ["regression gate"]
+  operational_meaning: >-
+    agent 組態變更(prompt／model／memory／tool policy)的 machine-checkable 准入條件:
+    golden task pass_rate >= baseline - tolerance 且 cost／latency <= budget。
+    為 18 方法論演進協定「新模型讀懂判定」的可執行證據形式;
+    哲學沿用 GATE:VDD(machine-checkable)與原則 5(可證明失敗能力)。
+  is_not:
+    - "GATE:VDD(被測物=產品品質屬性;GATE:REGRESSION 被測物=agent workflow 組態。哲學重疊≠物件重疊,不得混用)"
+    - "07 canonical 序列成員(不改 5 Gates；權威主定義與執行契約見 23)"
+  scope_note: >-
+    LLM-as-judge 不得為唯一 oracle(比照 TERM:ADMISSION:LLM 不得為唯一裁決者)。
+    被忽略的 eval 維度(cost／latency regression)不得以單一 pass rate 遮蔽。
+
+CHANGE_PROFILE:
+  stable_id: TERM:CHANGE-PROFILE
+  canonical_term: "Change Profile"
+  surface_tokens: ["change profile"]
+  operational_meaning: >-
+    依 FEATURE／DEFECT／REFACTOR／DEPENDENCY／DOC_CONFIG／MIGRATION／EMERGENCY
+    判定既有 Gate assertion 的適用性與所需 evidence；權威頁見 24。
+  is_not:
+    - "Autonomy Tier（那是誰可自動執行）"
+    - "System Profile（那是被建置系統的型態）"
+  scope_note: "只裁剪不適用 assertion；不得把 mandatory always-on controls 標記 N/A。"
+
+SYSTEM_PROFILE:
+  stable_id: TERM:SYSTEM-PROFILE
+  canonical_term: "System Profile"
+  surface_tokens: ["system profile"]
+  operational_meaning: >-
+    依 web／service／mobile／data／event／IaC／AI product 等系統型態，
+    決定 UI、API、quality、release 與安全 assertion 的適用範圍；權威頁見 24。
+  is_not:
+    - "Change Profile"
+    - "Autonomy Tier"
+  scope_note: "與 Change Profile、risk flags 合併解析；衝突採較嚴格規則。"
+
+WAIVER:
+  stable_id: TERM:WAIVER
+  canonical_term: "Time-bounded Policy Waiver"
+  surface_tokens: [waiver, exception]
+  operational_meaning: >-
+    具 scope、owner、期限、風險聲明、補償控制與獨立核准的有限期例外；權威頁見 19。
+  is_not:
+    - "永久跳過 Gate"
+    - "Break-glass"
+  scope_note: "無 expires_at 或由實作 Agent 自核的 waiver 無效。"
+
+BREAK_GLASS:
+  stable_id: TERM:BREAK-GLASS
+  canonical_term: "Break-glass Procedure"
+  surface_tokens: ["break-glass"]
+  operational_meaning: >-
+    僅於重大事故或營運中斷時，以最小權限、最短時間與不可變稽核暫時繞過正常流程；權威頁見 19。
+  is_not:
+    - "日常快速通道"
+    - "長期 waiver"
+  scope_note: "必須自動到期、撤權並於事後補齊 evidence 與復盤。"
+
+TRUST_LABEL:
+  stable_id: TERM:TRUST-LABEL
+  canonical_term: "Context Trust Label"
+  surface_tokens: ["trust label"]
+  operational_meaning: >-
+    標記進入 Agent context 的內容來源信任層級，如 TRUSTED_CANONICAL、
+    TRUSTED_TOOL、GENERATED_UNVERIFIED、UNTRUSTED_USER、UNTRUSTED_EXTERNAL；權威頁見 20。
+  is_not:
+    - "Authorization"
+    - "內容真實性的永久保證"
+  scope_note: "工具返回的外部內容不因包在可信工具輸出中而自動升格為 canonical instruction。"
+
+EVIDENCE:
+  stable_id: TERM:EVIDENCE
+  canonical_term: "Verifiable Evidence Envelope"
+  surface_tokens: [evidence, provenance]
+  operational_meaning: >-
+    綁定 subject、change、Gate、policy version、actor、tool／model、environment、hash、oracle、
+    artifact、signature、retention 與 freshness 的可驗證證據；權威頁見 21。
+  is_not:
+    - "Agent 自述已完成"
+    - "無 artifact／版本／來源的截圖或自然語言結論"
+  scope_note: "Notion 摘要不是權威；machine artifact 與完整 envelope 才是。"
+
+RELEASE_PROFILE:
+  stable_id: TERM:RELEASE-PROFILE
+  canonical_term: "Release Safety Profile"
+  surface_tokens: ["release profile"]
+  operational_meaning: >-
+    定義 platform、rollout strategy、exposure、observation window、control、promotion、abort、rollback／forward-fix；權威頁見 22。
+  is_not:
+    - "部署成功狀態"
+    - "Quality Profile"
+  scope_note: "GATE:DEPLOY 通過只代表具備安全發布條件；Production Observation 另行驗證。"
+
+EVALOPS:
+  stable_id: TERM:EVALOPS
+  canonical_term: "Agent EvalOps"
+  surface_tokens: [EvalOps, "agent evals"]
+  operational_meaning: >-
+    對 model／prompt／routing／memory／compression／tool policy／guardrail 的版本化、可回放回歸評測；權威頁見 23。
+  is_not:
+    - "產品功能測試"
+    - "一次性 benchmark"
+  scope_note: "被測物是 Agent workflow 組態；使用 TERM:GOLDEN-TASK 與 GATE:REGRESSION。"

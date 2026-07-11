@@ -1,0 +1,21 @@
+resolution:
+  inputs: [system_profile, change_profile, autonomy_tier_or_risk_flags, explicit_project_overrides]
+  conflict_rule: stricter_rule_wins
+  override_requires: [policy_id, owner, evidence]
+
+assertion_contract:
+  assertion_id: "<stable policy id>"
+  applicable_when: "<profile expression>"
+  required_evidence: []
+  on_not_applicable:
+    requires_reason: true
+    oracle: profile-resolver
+    evidence_type: applicability-decision
+
+mandatory_always_on_controls:
+  - stable_identity_and_change_provenance
+  - implementer_cannot_weaken_protected_policy_test_or_threshold
+  - secrets_data_classification_and_least_privilege
+  - audit_and_evidence_integrity
+  - direct_merge_and_deployment_permission_control
+  - named_human_approval_for_waiver_and_break_glass

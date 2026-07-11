@@ -2,6 +2,8 @@
 
 > **任何 AI agent 進入使用此框架的專案時，從這裡開始。**
 
+> **Authority preflight（MCR:2026:004）**：先讀 `governance/manifest.yaml`。若 `repository_state` 為 `SHADOW_NON_AUTHORITATIVE`，不得把 repo shadow 宣稱為 canonical，也不得執行 authority cutover。
+
 ---
 
 ## §0 Canonical Glossary（術語速查）
@@ -17,7 +19,8 @@
 | **Headroom** | Context 壓縮層（**≠ memory engine**） |
 | **GATE:ADMIT** | 上游探索閘門（07 的上游，獨立閘門）|
 
-完整術語表：[docs/00-canonical-glossary.md](../docs/00-canonical-glossary.md)
+完整 machine-readable shadow：[`governance/glossary.yaml`](../governance/glossary.yaml)
+Human reference：[docs/00-canonical-glossary.md](../docs/00-canonical-glossary.md)
 
 ---
 

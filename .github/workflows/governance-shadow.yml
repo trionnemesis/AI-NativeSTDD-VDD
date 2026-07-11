@@ -1,0 +1,37 @@
+name: Governance shadow validation
+
+on:
+  pull_request:
+    paths:
+      - "governance/**"
+      - "generated/notion-canonical-view.md"
+      - "scripts/governance.py"
+      - "tests/test_governance.py"
+      - "requirements-governance.txt"
+      - ".github/workflows/governance-shadow.yml"
+  push:
+    branches: [main]
+    paths:
+      - "governance/**"
+      - "generated/notion-canonical-view.md"
+      - "scripts/governance.py"
+      - "tests/test_governance.py"
+      - "requirements-governance.txt"
+
+permissions:
+  contents: read
+
+jobs:
+  validate:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: pip
+          cache-dependency-path: requirements-governance.txt
+      - run: python -m pip install -r requirements-governance.txt
+      - run: python scripts/governance.py validate
+      - run: python scripts/governance.py render --check
+      - run: python -m unittest discover -s tests -v

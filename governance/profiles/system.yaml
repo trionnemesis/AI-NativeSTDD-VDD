@@ -1,0 +1,20 @@
+stable_id: "TERM:SYSTEM-PROFILE"
+profile_kind: system
+profiles:
+  WEB_FRONTEND:
+    concerns: [ui_state, accessibility, visual_interaction, browser_matrix, rum, feature_flag]
+  BACKEND_SERVICE_API:
+    concerns: [api_event_compatibility, slo, load, authorization, resilience, canary, consumer_impact]
+  MOBILE:
+    concerns: [device_os_matrix, offline, permissions, signing, store_rollout, remote_kill, non_immediate_rollback]
+  DATA_PIPELINE:
+    concerns: [schema, lineage, data_quality, replay, idempotency, backfill, privacy, late_duplicate_data]
+  EVENT_DRIVEN:
+    concerns: [event_schema, ordering, deduplication, consumer_compatibility, dlq, replay, eventual_consistency]
+  INFRASTRUCTURE_IAC:
+    concerns: [plan, policy_as_code, drift, blast_radius, state_protection, credential, rollback_or_recreate]
+  AI_LLM_PRODUCT:
+    concerns: [dataset_version, prompt_version, model_version, safety_eval, tool_policy, trace, human_escalation, cost, latency]
+  INTERNAL_TOOL:
+    concerns: [authentication, authorization, audit, data_classification]
+    note: "Rollout scale may be reduced, but listed concerns remain mandatory."

@@ -1,0 +1,20 @@
+gate_id: "GATE:DEPLOY"
+scope: canonical_pipeline
+stage: deploy
+trigger: { when: after_verification, before: before_release }
+preconditions: [gate_vdd_passed, release_profile_resolved, evidence_contract_satisfied]
+assertions:
+  - { check: release_profile_compatible_with_system_profile }
+  - { check: migration_reversible_or_backward_compatible, applicable_when: "change_impacts_data_or_schema" }
+  - { check: controlled_rollout_ready }
+  - { check: canary_control_and_attribution_defined, applicable_when: "release_profile.requires_canary" }
+  - { check: observation_window_defined }
+  - { check: promotion_abort_and_rollback_criteria_defined }
+  - { check: smoke_test_present }
+  - { check: supply_chain_evidence_present, required: [sbom, build_provenance, artifact_signature] }
+  - { check: active_waivers_valid_and_unexpired }
+  - { check: observability_dashboard_updated }
+  - { check: alert_and_runbook_synced }
+on_fail: { policy: "reject: not_deployable" }
+evidence: [release_profile, migration_plan, rollout_config, smoke_test, rollback_runbook, supply_chain_attestations, waiver_records]
+post_deploy: "22 release state machine -> production operational validation -> accept evidence or SIGNAL/Delta Spec"

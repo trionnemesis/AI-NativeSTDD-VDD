@@ -1,6 +1,6 @@
 # 00 · Canonical Glossary（術語權威定義）
 
-> **唯一來源原則**：本文件是所有術語的唯一定義位置。其他文件的術語以此為準，矛盾時本文件優先。
+> **MCR:2026:004 shadow notice**：本頁是 2026-06-26 human-reference snapshot，不是目前 machine authority。Shadow machine copy 位於 `governance/glossary.yaml`；正式 cutover 前，矛盾仍以 Notion root Canonical Glossary 為準。
 
 ---
 

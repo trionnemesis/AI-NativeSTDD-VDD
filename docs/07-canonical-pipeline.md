@@ -1,6 +1,6 @@
 # 07 · Canonical Pipeline（權威 CI/CD Pipeline）
 
-> **本章是 STDD×VDD pipeline 的權威定義。** 所有其他章節中提及的 pipeline 順序以本章為準。
+> **MCR:2026:004 shadow notice**：本頁是 human-reference snapshot。Machine-readable contracts 位於 `governance/gates/`；正式 cutover 前，Notion 07／05 仍是 authority。固定序列仍為 `GATE:SPEC→RED→GREEN→VDD→DEPLOY`。
 
 ---
 

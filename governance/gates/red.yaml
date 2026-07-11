@@ -1,0 +1,15 @@
+gate_id: "GATE:RED"
+scope: canonical_pipeline
+stage: red
+trigger: { when: after_test_gen, before: before_implementation }
+preconditions: [approved_spec_present, agent_isolation_enforced, change_profile_resolved]
+assertions:
+  - { check: red_or_alternative_evidence_valid, oracle: change-profile-policy }
+  - { check: test_fails_on_baseline, oracle: "run-on-baseline(commit_sha)", applicable_when: "change_profile in [FEATURE, DEFECT]" }
+  - { check: failure_reason_matches_requirement, applicable_when: "change_profile in [FEATURE, DEFECT]" }
+  - { check: characterization_or_compatibility_evidence_valid, applicable_when: "change_profile in [REFACTOR, DEPENDENCY, DOC_CONFIG, MIGRATION, EMERGENCY]" }
+  - { check: not_mocking_entire_sut, applicable_when: "test_artifact_created_or_modified" }
+  - { check: asserts_beyond_status_code, applicable_when: "test_artifact_created_or_modified" }
+  - { check: hermeticity_policy_pass, oracle: test-environment-policy }
+on_fail: { policy: "reject: no_failure_or_alternative_capability" }
+evidence: [profile_resolution, red_or_alternative_evidence_envelopes, test_environment_record]

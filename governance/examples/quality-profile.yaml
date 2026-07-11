@@ -1,0 +1,19 @@
+id: "QP:INTERACTIVE:STANDARD"
+ui_feedback: { metric: interaction_visual_feedback, threshold_ms: 50, percentile: p95, environment: local_browser }
+api_latency:
+  metric: server_response_time
+  threshold_ms: 200
+  percentile: p95
+  evaluation_window: 15m
+  min_samples: 1000
+  environment: staging_like_production
+  comparison: less_than
+  workload: { requests_per_second: 30, concurrent_users: 20 }
+transaction_completion: { metric: end_to_end_completion, threshold_ms: 800, percentile: p95 }
+reliability:
+  availability_target: 99.9
+  error_rate_max_percent: 0.1
+  error_budget: { window_days: 28, max_burn_rate: 1.0 }
+resilience: { recovery_time_target_ms: 5000 }
+mutation: { changed_code_min_score: 0.70 }
+accessibility: { wcag_level: "AA", critical_violations_max: 0 }

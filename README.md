@@ -6,6 +6,19 @@
 
 ---
 
+## Authority status（MCR:2026:004）
+
+本 repository 目前是 **non-authoritative shadow**。在 schema、Stable ID lint、5-Gate conformance、Notion semantic hash、generated-view idempotency、rollback 與人類 cutover approval 全部通過前，**Notion 仍是 canonical authority**。
+
+- Machine-readable shadow：[`governance/`](governance/README.md)
+- Authority／cutover 狀態：[`governance/manifest.yaml`](governance/manifest.yaml)
+- Deterministic human view：[`generated/notion-canonical-view.md`](generated/notion-canonical-view.md)
+- 驗證：`pip install -r requirements-governance.txt && python scripts/governance.py validate`
+
+衝突時不得靜默選邊；shadow 階段以 Notion 為準並讓比較流程 loud fail。
+
+---
+
 ## 是什麼？
 
 這個 repo 是一套完整的 **Specification & Test-Driven Development × Verification & Validation-Driven Development（STDD×VDD）** 治理框架模板，專為 Claude Code CLI 環境設計。
@@ -34,16 +47,16 @@ bash scripts/init.sh
 
 ---
 
-## 5 個規範閘門（Canonical Gates）
+## 5 個規範閘門（Canonical Pipeline）
 
 ```
-GATE:ADMIT ──▶ GATE:SPEC ──▶ GATE:RED ──▶ GATE:GREEN ──▶ GATE:VDD ──▶ GATE:DEPLOY
-  (探索)          (規格)        (紅燈)         (綠燈)         (驗證)         (部署)
+GATE:ADMIT ──▶ Change Intent ──▶ GATE:SPEC ──▶ GATE:RED ──▶ GATE:GREEN ──▶ GATE:VDD ──▶ GATE:DEPLOY
+  (上游准入；不計入 canonical 5-Gate sequence)
 ```
 
 | Gate | 觸發條件 | 強制等級 | 說明 |
 |------|---------|---------|------|
-| `GATE:ADMIT` | 任何新需求進入 | prompt-only | Discovery & Dispatch Loop，07 上游 |
+| `GATE:ADMIT` | 任何新需求進入 | 見 14 contract | Discovery & Dispatch Loop，07 上游；**不計入 5 Gates** |
 | `GATE:SPEC` | 寫實作前 | **runtime（hook deny）** | 必須有對應 `.feature` 檔 |
 | `GATE:RED` | 進入實作前 | **runtime（hook deny）** | 測試必須當前失敗，存 `.vdd/red/*.json` |
 | `GATE:GREEN` | 結束前 | **runtime（Stop hook block）** | 全測試通過 + lint clean |
@@ -58,7 +71,16 @@ GATE:ADMIT ──▶ GATE:SPEC ──▶ GATE:RED ──▶ GATE:GREEN ──▶
 AI-NativeSTDD-VDD/
 ├── README.md                    ← 本文件
 ├── CLAUDE.md                    ← Claude Code agent 指令（從這裡啟動）
-├── docs/                        ← 14 章規格文件
+├── governance/                  ← MCR:2026:004 machine-readable shadow
+│   ├── manifest.yaml            ← authority state、frozen pipeline、cutover preconditions
+│   ├── glossary.yaml            ← Canonical Glossary shadow
+│   ├── registries/              ← Stable ID / Gate registries
+│   ├── gates/                   ← 5 canonical + upstream ADMIT + auxiliary REGRESSION
+│   ├── profiles/                ← System / Change / applicability contracts
+│   └── schemas/                 ← JSON Schemas
+├── generated/
+│   └── notion-canonical-view.md ← deterministic human view（勿手改）
+├── docs/                        ← 15 章 human reference
 │   ├── 00-canonical-glossary.md
 │   ├── 01-method-architecture.md
 │   ├── 02-canonical-spec.md
@@ -92,6 +114,7 @@ AI-NativeSTDD-VDD/
 │       ├── managed-settings.json ← macOS org-level config（P0）
 │       └── mcp.json             ← Oracle MCP server config
 └── scripts/
+    ├── governance.py            ← validate / render / digest
     └── init.sh                  ← 快捷符號連結
 ```
 
@@ -106,6 +129,8 @@ clone 後，在 Claude Code 中執行：
 ```
 
 `CLAUDE.md` 會被 Claude Code 自動載入，包含完整的閘門規則與禁止行為。
+
+Agent 必須先讀 `governance/manifest.yaml` 判斷 authority state，再只載入任務相關的 gate／profile；不得把 `docs/` 全量預載當成 machine canonical。
 
 ---
 
@@ -181,4 +206,5 @@ fallthrough 預設 = **T2**。
 ## 原始規格
 
 [AI-Native STDD × VDD 工程治理系統](https://www.notion.so/AI-Native-STDD-VDD-382f5b2d1a9081e9a972f0b33fad3142) — Notion  
-整合版：本 repo（2026-06-26）
+2026-06-26 整合版：`docs/`（human reference）
+2026-07-11 migration shadow：`governance/`（尚未 cutover）

@@ -1,0 +1,64 @@
+gate_id: "GATE:VDD"
+scope: canonical_pipeline
+stage: quality_v_and_v
+binds_to: "TERM:VDD"
+trigger:
+  when: "post-Green AND pre-Deploy"
+preconditions:
+  - functional_tests: passing
+  - system_profile: resolved
+  - change_profile: resolved
+  - red_or_alternative_evidence: present
+  - telemetry_hooks: present
+  - quality_profile: resolved
+assertions:
+  performance:
+    - metric_ref: quality_profile.api_latency.metric
+      percentile_ref: quality_profile.api_latency.percentile
+      threshold_ref: quality_profile.api_latency.threshold_ms
+      evaluation_window_ref: quality_profile.api_latency.evaluation_window
+      min_samples_ref: quality_profile.api_latency.min_samples
+      environment_ref: quality_profile.api_latency.environment
+      condition: "observed(percentile_ref) < threshold_ref"
+      at_load: quality_profile.api_latency.workload
+  reliability:
+    - metric: error_budget_burn_rate
+      condition: "<= quality_profile.reliability.error_budget.max_burn_rate"
+      window_days: quality_profile.reliability.error_budget.window_days
+    - metric: slo_attainment
+      condition: ">= quality_profile.reliability.availability_target"
+  resilience:
+    - scenario: [fault_injection, timeout, retry]
+      condition: "recovers_within(quality_profile.resilience.recovery_time_target_ms)"
+  security:
+    - checks: [SAST, SCA, DAST, policy_gate]
+      condition: no_unwaived_findings
+  accessibility:
+    - checks: [automated_a11y_scan]
+      condition: no_unwaived_violations
+  mutation:
+    - metric: changed_code_mutation_score
+      condition: ">= quality_profile.mutation.changed_code_min_score"
+oracle:
+  performance: metric-query(load-test-report)
+  reliability: metric-query(SLO-dashboard)
+  resilience: fault-injection-runner
+  security: scanner-report
+  accessibility: a11y-scanner-report
+  mutation: mutation-testing-tool
+  semantic: "LLM-judge(rubric=required)"
+on_fail:
+  policy: "reject | repair(strategy_registry) | escalate | waiver(TERM:WAIVER)"
+  forbidden: implementer_agent_lowers_threshold
+  waiver_requires: [independent_human_approval, expires_at, compensating_controls, evidence_envelope]
+evidence_required:
+  - p50_p95_p99_report
+  - slo_burn_rate_record
+  - recovery_time_and_failure_mode
+  - scan_report_with_waivers
+  - wcag_scan_report_with_waivers
+  - mutation_score_report
+final_authority:
+  operational_quality_assumptions: production_telemetry
+  non_operational_domains: [security, privacy, authorization, compliance]
+  rule: "non_operational_domains require multi-source evidence; absence_of_incident is not proof"

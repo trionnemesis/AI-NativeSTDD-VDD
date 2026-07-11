@@ -1,0 +1,35 @@
+gate_id: "GATE:ADMIT"
+scope: upstream
+in_canonical_pipeline: false
+stage: admission
+trigger: { when: signal_triaged, before: change_intent_emit }
+preconditions: [source_authenticated, trust_label_assigned, fingerprint_computed, dedup_decided, classified, provenance_linked, queue_capacity_checked]
+assertions:
+  - { check: source_authenticity_valid, oracle: "source-policy", on_false: "REJECT:UNTRUSTED_SOURCE" }
+  - { check: content_trust_label_valid, oracle: "20 trust-label policy", on_false: "DEFER:UNTRUSTED_CONTENT_REVIEW" }
+  - { check: provenance_present, on_false: "REJECT:NO_PROVENANCE" }
+  - { check: rate_limit_and_queue_budget_ok, on_false: "DEFER:BACKPRESSURE" }
+  - { check: dedup_status_new, oracle: "dedup_gate.decide", on_false: "REJECT:DUPLICATE" }
+  - { check: not_touches_test_path, on_false: "REROUTE:SELF_HEALING(13)" }
+  - { check: tier_assigned, oracle: "assign_tier", emits: autonomy_tier }
+  - { check: tier_not_t3, on_false: "ESCALATE:HIGH_RISK_HUMAN_REQUIRED" }
+  - { check: severity_corroborated_if_high, on_false: "ESCALATE:UNCORROBORATED_SEVERITY" }
+  - { check: dor_satisfied, oracle: "dor_check", on_false: "DEFER:DOR_NOT_MET" }
+on_fail: { policy: "escalate | reject | defer | reroute — per assertion; never silently ADMIT" }
+forbidden: llm_as_sole_admission_authority
+evidence: [originating_signal, source_authentication, trust_label, ruleset_version, admission_decision, autonomy_tier, dispatch_assignment, evidence_envelopes]
+emits: [change_intent, provisional_system_profile, provisional_change_profile, priority_reference]
+enforcement: [deterministic_ruleset, claude_code_hooks, managed_settings]
+queue_policy:
+  max_pending_by_tier: { T1: 50, T2: 20, T3: 10 }
+  max_dispatch_per_service: 2
+  max_concurrent_high_risk: 1
+  stale_after: 7d
+  on_overflow: "DEFER:BACKPRESSURE"
+  emergency_override: "TERM:BREAK-GLASS"
+tier_calibration:
+  t1_sample_rate: "policy-defined; risk-stratified"
+  review_independent_of_implementer: true
+  metrics: [misclassification_rate, post_merge_revert_rate, incident_rate, protected_path_escape_rate, human_diff_amendment_rate]
+  tighten_when: ["metric exceeds policy threshold", "security/privacy/data incident"]
+  loosen_when: ["human-approved policy change with observation window and rollback"]
