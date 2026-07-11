@@ -1,0 +1,16 @@
+gate_id: "GATE:GREEN"
+scope: canonical_pipeline
+stage: green
+trigger: { when: after_implementation }
+preconditions: [gate_red_passed_or_profile_alternative_accepted]
+assertions:
+  - { check: tests_pass, suites_ref: profile_resolution.required_test_suites }
+  - { check: tia_selection_evidence_valid, applicable_when: "TIA enabled", oracle: tia-policy }
+  - { check: nightly_full_regression_healthy, applicable_when: "TIA enabled" }
+  - { check: flaky_and_quarantine_policy_pass, oracle: test-reliability-policy }
+  - { check: static_analysis_pass }
+  - { check: lint_format_pass }
+  - { check: protected_tests_unmodified, oracle: test-diff-guard }
+on_fail: { policy: "reject | repair" }
+forbidden: implementer_agent_weakens_tests_thresholds_policies_fixtures_or_quarantine
+evidence: [profile_resolution, selected_and_always_run_tests, test_run_evidence, static_analysis_evidence, test_integrity_evidence]

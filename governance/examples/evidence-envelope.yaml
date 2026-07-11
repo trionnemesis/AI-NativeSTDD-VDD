@@ -1,0 +1,23 @@
+evidence_id: "EVID:2026:000001"
+evidence_type: "test | scan | metric | attestation | human_decision | waiver"
+subject_ids: []
+change_id: "CR:*"
+gate_id: "GATE:*"
+policy_id: "<assertion / policy>"
+policy_version: "<semver or hash>"
+actor: { id: "<human / service / agent>", type: "human | tool | agent | service", role: "<role>" }
+tool: { name: "<tool>", version: "<version>" }
+model: { id: "<model if applicable>" }
+environment: { id: "<runner / cluster / device profile>", config_hash: "<hash>" }
+inputs: { artifact_hashes: [] }
+outputs: { artifact_hashes: [] }
+started_at: "<timestamp>"
+completed_at: "<timestamp>"
+result: "pass | fail | inconclusive"
+oracle: "<deterministic source or human rubric>"
+artifact_uri: "<immutable location>"
+signature: "<attestation / signature>"
+retention_class: "<class>"
+expires_at: "<timestamp or null>"
+supersedes: []
+trust_label: "TERM:TRUST-LABEL value"

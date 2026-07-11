@@ -1,0 +1,10 @@
+release_profile_id: "RP:<scope>:<nnn>"
+platform: "web | service | mobile | data | infrastructure"
+strategy: "canary | blue_green | ring | feature_flag | store_rollout"
+initial_exposure_percent: 1
+observation_window: "<duration>"
+comparison: { control_required: true, baseline_version: "<version>" }
+promotion_criteria: []
+abort_criteria: []
+rollback_or_forward_fix: "<strategy>"
+owner: "<release owner>"

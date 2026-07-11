@@ -1,0 +1,21 @@
+gates:
+  - { id: "GATE:SPEC", name: "Spec Gate", stage: spec_approval, spec: "07 GATE:SPEC" }
+  - { id: "GATE:RED", name: "Red Gate", stage: red, spec: "07 GATE:RED + 06 Red Evidence" }
+  - { id: "GATE:GREEN", name: "Green Gate", stage: green, spec: "07 GATE:GREEN" }
+  - { id: "GATE:VDD", name: "Verification Gate (V&V-DD)", stage: quality_v_and_v, spec: "05 GATE:VDD + 07 Gate 4" }
+  - { id: "GATE:DEPLOY", name: "Deployment Gate", stage: deploy, spec: "07 GATE:DEPLOY" }
+status: "5/5 contracts defined; runtime enforcement must be verified and must not be inferred from documentation alone"
+
+upstream_gates:
+  - id: "GATE:ADMIT"
+    name: "Admission Gate"
+    stage: admission
+    spec: "14 GATE:ADMIT"
+    note: "pre-SPEC admission; emits Change Intent; not part of the five-gate canonical sequence"
+
+auxiliary_gates:
+  - id: "GATE:REGRESSION"
+    name: "Agent Regression Gate"
+    stage: agent_configuration_regression
+    spec: "23 GATE:REGRESSION"
+    note: "tests agent workflow configuration; not part of the five-gate canonical sequence"

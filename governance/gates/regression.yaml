@@ -1,0 +1,13 @@
+gate_id: "GATE:REGRESSION"
+scope: auxiliary
+in_canonical_pipeline: false
+stage: agent_configuration_regression
+subject: agent_workflow_configuration
+assertions:
+  - { check: correctness_and_safety_not_below_baseline_tolerance }
+  - { check: cost_and_latency_within_budget }
+  - { check: no_new_critical_failure_in_high_risk_golden_tasks }
+  - { check: trace_and_evidence_schema_complete }
+  - { check: result_replayable_and_variance_within_tolerance }
+forbidden: llm_as_sole_oracle
+evidence: [versioned_golden_tasks, baseline, run_results, trace_grades, cost_latency_record, safety_record]

@@ -1,0 +1,35 @@
+stable_id: "TERM:CHANGE-PROFILE"
+profile_kind: change
+profiles:
+  FEATURE:
+    behavior: observable_behavior_added
+    red_evidence: required
+    requirements: [full_spec, green, applicable_vdd, controlled_release]
+  DEFECT:
+    behavior: existing_behavior_corrected
+    red_evidence: required_reproducer
+    requirements: [regression, failure_path, affected_quality_verification]
+  REFACTOR:
+    behavior: external_behavior_unchanged
+    red_evidence: alternative_allowed
+    requirements: [characterization_or_regression, api_compatibility, mutation_or_equivalent_evidence]
+  DEPENDENCY:
+    behavior: dependency_change
+    red_evidence: alternative_allowed
+    requirements: [sca, sbom, license, api_abi_compatibility, regression, supply_chain_provenance]
+    tier_rule: "direct dependency major update raises the default tier"
+  DOC_CONFIG:
+    behavior: documentation_or_configuration_change
+    red_evidence: alternative_allowed
+    requirements: [spec_lite, green_lite]
+    low_risk_forbidden_when_touching: [ci, security, deployment, policy, tests]
+  MIGRATION:
+    behavior: schema_data_event_or_platform_migration
+    red_evidence: alternative_allowed
+    default_tier: T3
+    requirements: [expand_contract, backfill, compatibility, rollback_or_forward_fix]
+  EMERGENCY:
+    behavior: break_glass_change
+    red_evidence: alternative_allowed
+    activation: "TERM:BREAK-GLASS"
+    requirements: [post_event_evidence, review, remediation_change_intent]

@@ -3,21 +3,23 @@
 > **這是 AI-Native STDD×VDD 工程治理系統的 agent 指令檔。**  
 > Claude Code agent 在任何套用此框架的專案中，必須嚴格遵守以下規則。
 
+> **Authority state（MCR:2026:004）**：先讀 `governance/manifest.yaml`。目前 repo 是 `SHADOW_NON_AUTHORITATIVE`，Notion 仍為 canonical；本檔是相容性摘要。衝突時必須 loud fail，不得自行把 repo shadow 升格。
+
 ---
 
 ## 一、啟動流程
 
-首次進入專案時，**必須先讀 `setup/AGENT_SETUP_PROTOCOL.md` 並執行 Confirm Mode**。
+首次進入專案時，**必須先讀 `governance/manifest.yaml`，再讀 `setup/AGENT_SETUP_PROTOCOL.md` 並執行 Confirm Mode**。
 
 ```
-FIRST ACTION: 閱讀 setup/AGENT_SETUP_PROTOCOL.md → 執行 Confirm Mode 清單
+FIRST ACTION: 讀 governance/manifest.yaml → 依任務載入 gate/profile → 閱讀 setup/AGENT_SETUP_PROTOCOL.md → 執行 Confirm Mode
 ```
 
 ---
 
-## 二、Canonical Glossary（術語定義）
+## 二、Glossary compatibility summary
 
-以下定義為本專案唯一權威。所有歧義以此為準。
+Machine-readable shadow 位於 `governance/glossary.yaml`；以下只保留舊版相容性摘要，不得取代完整 glossary 或 Notion authority。
 
 | 術語 | 定義 |
 |------|------|
@@ -153,6 +155,8 @@ Context 被壓縮後，`SessionStart(compact)` hook 會自動重注入關鍵閘�
 
 ## 十一、相關文件
 
-- 完整規格：`docs/` 目錄下 14 個章節
+- Authority state：`governance/manifest.yaml`
+- Task-specific machine contracts：`governance/gates/`、`governance/profiles/`
+- Human reference：`docs/` 目錄
 - Agent 設定：`setup/AGENT_SETUP_PROTOCOL.md`
 - 原始規格：https://www.notion.so/AI-Native-STDD-VDD-382f5b2d1a9081e9a972f0b33fad3142

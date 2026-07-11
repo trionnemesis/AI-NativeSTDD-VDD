@@ -1,0 +1,10 @@
+golden_task_id: "GT:<domain>:<nnn>"
+version: "<semver>"
+input_fixture: "<immutable ref>"
+expected_behaviors: []
+forbidden_behaviors: []
+oracles: []
+risk_class: "low | medium | high"
+data_classification: "PUBLIC | INTERNAL | CONFIDENTIAL | RESTRICTED"
+contamination_controls: []
+owner: "<owner>"

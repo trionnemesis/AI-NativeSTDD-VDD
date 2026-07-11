@@ -1,0 +1,28 @@
+conventions:
+  separator: ":"
+  registry_singletons: "NAMESPACE:NAME"
+  instance_ids: "PREFIX:SCOPE:NNN"
+  path_materialization: "作為檔案/目錄名時冒號改為連字號；canonical 仍為冒號"
+
+namespaces:
+  TERM: { kind: registry, defined_in: "root Canonical Glossary", example: "TERM:VDD" }
+  GATE: { kind: registry, defined_in: "02 Gate Registry / 05 / 07", example: "GATE:VDD" }
+  REQ: { kind: instance, defined_in: "features/*/requirements", example: "REQ:ENROLL:014" }
+  INV: { kind: instance, defined_in: "domain/invariants", example: "INV:COURSE:003" }
+  BDD: { kind: instance, defined_in: "features/*/scenarios", example: "BDD:ENROLL:021" }
+  API: { kind: instance, defined_in: "contracts/openapi", example: "API:ENROLL:POST:001" }
+  UI: { kind: instance, defined_in: "features/*/ui-states", example: "UI:COURSE:DISABLED" }
+  QP: { kind: instance, defined_in: "quality/profiles", example: "QP:INTERACTIVE:STANDARD" }
+  ADR: { kind: instance, defined_in: "decisions", example: "ADR:014" }
+  CR: { kind: instance, defined_in: "changes", example: "CR:2026:017" }
+  SIG: { kind: instance, defined_in: "14 Discovery sources", example: "SIG:CI:2026:0042" }
+  ADMIT: { kind: instance, defined_in: "14 admission decisions", example: "ADMIT:2026:0042" }
+  WT: { kind: instance, defined_in: "14 worktree allocations", example: "WT:2026:0042" }
+  ATTEST: { kind: instance, defined_in: "14/07 attestations (OOB)", example: "ATTEST:WT:2026:0042" }
+  MCR: { kind: instance, defined_in: "18 Methodology Change Request", example: "MCR:2026:004" }
+  POL: { kind: instance, defined_in: "19/21 policy registry", example: "POL:TEST:RED-EVIDENCE:001" }
+  WAIVER: { kind: instance, defined_in: "19 waiver records", example: "WAIVER:2026:001" }
+  EVID: { kind: instance, defined_in: "21 Evidence Envelope", example: "EVID:2026:000001" }
+  RP: { kind: instance, defined_in: "22 Release Profiles", example: "RP:SERVICE:001" }
+  REL: { kind: instance, defined_in: "22 release executions", example: "REL:2026:0042" }
+  GT: { kind: instance, defined_in: "23 Golden Tasks", example: "GT:CODING:001" }

@@ -1,0 +1,30 @@
+gate_id: "GATE:SPEC"
+scope: canonical_pipeline
+stage: spec_approval
+trigger: { when: pre-implementation }
+preconditions:
+  - change_intent_defined
+  - delta_spec_created
+  - impact_analysis_complete
+  - system_profile_resolved
+  - change_profile_resolved
+assertions:
+  - { check: assertion_applicability_resolved, oracle: profile-policy-lint }
+  - { check: stable_ids_complete, oracle: id-registry-lint }
+  - { check: domain_invariants_confirmed, oracle: domain-review, applicable_when: "change_profile not in [DOC_CONFIG] or touches_invariant" }
+  - { check: bdd_scenarios_unambiguous, oracle: "review+linter", applicable_when: "change_profile in [FEATURE, DEFECT]" }
+  - { check: ui_states_cover, required: [Loading, Error, Empty, Disabled], applicable_when: "system_profile.has_ui and change_impacts_ui" }
+  - { check: api_contract_defined, applicable_when: "change_impacts_api_or_event_contract" }
+  - { check: quality_profile_referenced, applicable_when: "profile_requires_vdd" }
+  - { check: breaking_change_flagged }
+  - { check: compatibility_migration_and_deprecation_classified }
+  - { check: release_profile_referenced_or_not_applicable }
+  - { check: evidence_contract_satisfied, oracle: "TERM:EVIDENCE(21) schema" }
+on_fail: { policy: "reject -> back_to_delta_spec | waiver(19)" }
+evidence:
+  - approved_delta_spec
+  - impact_report
+  - compatibility_decision
+  - profile_resolution
+  - traceability_seed
+  - evidence_envelopes
