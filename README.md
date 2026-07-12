@@ -4,6 +4,12 @@
 
 這個 repository 提供 Claude Code 可採用的治理模板、機器可讀 shadow 與驗證工具；方法論的唯一權威仍是 Notion 的 [AI-Native STDD × VDD 工程治理系統](https://www.notion.so/AI-Native-STDD-VDD-382f5b2d1a9081e9a972f0b33fad3142)。
 
+## 36 秒看懂 AI-Native STDD × VDD
+
+[![AI-Native STDD × VDD 投影片式專案介紹](docs/media/ai-native-stdd-vdd-intro.gif)](docs/media/ai-native-stdd-vdd-intro.mp4)
+
+> 點擊動畫可播放 1280 × 720 MP4 完整版（無旁白）。
+
 ## 從這裡開始
 
 - 人類讀者：先讀 [Start Here｜人類閱讀入口與採用指南](https://app.notion.com/p/399f5b2d1a9081c496fafbb207e37913)，再依任務逐步載入文件。
