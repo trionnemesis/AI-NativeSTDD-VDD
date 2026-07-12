@@ -1,5 +1,7 @@
 # 11 · Headroom Context 壓縮層（Headroom Context Compression）
 
+> **Status: Implementation/reference snapshot.** Headroom 是 context-compression layer，不是 memory engine；runtime behavior、model integration 與 enforcement 必須按 target/version 重新驗證。
+
 ---
 
 ## 定義（重要）

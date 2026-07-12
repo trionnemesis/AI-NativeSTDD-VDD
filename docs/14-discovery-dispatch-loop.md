@@ -1,221 +1,67 @@
-# 14 · Discovery & Dispatch Loop（GATE:ADMIT）
+# 14 · Discovery & Dispatch Loop（upstream `GATE:ADMIT`）
 
----
+> **Authority boundary**：此頁是 [Notion 14｜Discovery & Dispatch Loop](https://app.notion.com/p/388f5b2d1a9081789657dbfc101ca8e6) 的 repository human reference。`GATE:ADMIT` 位於 07 canonical pipeline 的上游；它不改變 12 steps 或五道 Gate 的固定順序。
 
-## 概述
+## 目的與邊界
 
-GATE:ADMIT 是 STDD×VDD pipeline 的**上游閘門**，在 GATE:SPEC 之前運作。
+Discovery & Dispatch 將雜訊 signal 收斂為可處理的 Change Intent：
 
-它回答的問題：「這個需求是否清楚到可以開始寫規格？」
-
----
-
-## GATE:ADMIT 的定位
-
-```
-使用者/PM 提出需求
-        ↓
-   GATE:ADMIT ← 本章
-  Discovery & Dispatch Loop
-        ↓（通過）
-   GATE:SPEC（寫規格）
-        ↓
-   [GATE:RED → GATE:GREEN → GATE:VDD → GATE:DEPLOY]
+```text
+Signal → fingerprint → deterministic dedup → LLM-assisted classification
+       → GATE:ADMIT → tiered dispatch (role × WT:* × budget)
+       → Change Intent → 07 step 1
 ```
 
-GATE:ADMIT **不是 GATE:SPEC 的一部分**，它是獨立的上游閘門。
+它回答「這個 signal 是否足以形成 Change Intent、誰可以處理、可自動到什麼程度」，**不**決定產品商業優先級。queue order 必須引用外部 `priority_reference`；LLM 不得自行推斷商業價值。
 
----
+TIA 不屬本頁：它在 dispatch 後、`GATE:GREEN` 內回答「哪些測試值得跑」，不是 admission gate 或品質唯一權威。
 
-## 4 個 Admit 活動
+## Source、trust 與 admission constraints
 
-### Admit-1：需求探索（Discovery）
+| 必要控制 | 說明 |
+|---|---|
+| Source authenticity | 保存 service/requester identity、signature/token validation、event ID、payload hash、received time 與 ruleset/query version。 |
+| Trust label | CI、scanner、telemetry、issue 與 external content 都依 [20｜Agent Security](20-agent-security-privacy-threat-model.md) 標記 trust；`UNTRUSTED_EXTERNAL` 不可直接觸發高權限 dispatch。 |
+| Deterministic dedup | 每個 signal 必有 fingerprint；dedup 由 deterministic ruleset 決定，不能由 LLM 唯一裁決。 |
+| Bounded queue | 依 source/service 設 rate limit、pending/concurrent/tokens/time/cost budget、backpressure、cancellation 與 supersession。 |
+| Test-path reroute | 觸及 test path 的 signal 改道至 Self-Healing CI governance，禁止直接當一般 implementation dispatch。 |
+| Provenance | 從 `SIG:*` 到 `ADMIT:*`、tier、dispatch、worktree attestation 的關係需寫入 Evidence Envelope。 |
 
-確認需求的完整性：
+高嚴重度 classification 必須有 deterministic corroboration，例如 CVE exact match、SLO numeric breach 或 baseline test-red。LLM 可以提供 `type`、`severity`、`affected_ids` 作為資料，但不能成為唯一 authority。
 
-```yaml
-# ADMIT:001 探索清單
-admit_id: "ADMIT:001"
-raw_request: "讓使用者可以用手機登入"
+## `GATE:ADMIT` outcome
 
-discovery_questions:
-  - "手機登入是替代還是補充現有 email 登入？"
-  - "OTP 或密碼？OTP 的有效期多長？"
-  - "手機號碼是否需要事先驗證才能設定？"
-  - "失敗嘗試次數上限是多少？"
-  - "是否需要兩步驟驗證的整合？"
+| Outcome | 說明 |
+|---|---|
+| `ADMIT` | source、trust、provenance、dedup、queue、tier、severity corroboration、Definition of Ready 均符合；輸出 Change Intent。 |
+| `REJECT` | untrusted source、無 provenance 或 duplicate。 |
+| `DEFER` | backpressure、未滿 Definition of Ready 或需要 untrusted-content review。 |
+| `ESCALATE` | T3、未佐證的 high severity 或其他需人類裁決的情況。 |
+| `REROUTE` | test-path / self-healing 類 signal 改走受控維運迴圈。 |
 
-answers: {}                  # 由 PM/使用者回答
-status: "pending_answers"
-```
+每種非 ADMIT 結果都必須 loud fail，不能靜默 dispatch。
 
-### Admit-2：衝突偵測（Conflict Detection）
+## Autonomy tiers
 
-與現有規格的衝突分析：
+| Tier | Deterministic boundary | 允許動作 |
+|---|---|---|
+| **T1** | low-severity `dependency_patch`、`lint`、`doc_drift`。 | auto-dispatch + draft/propose PR；worktree write attestation 先 PASS，direct merge 受 managed policy 限制。 |
+| **T2** | bug 或 performance regression 且不觸及 invariant；未命中其他規則時的 default。 | auto-dispatch + draft PR + mandatory human review。 |
+| **T3** | touches invariant、security、schema migration，或 uncorroborated high severity。 | human-written Change Intent；禁止 auto-dispatch。 |
 
-```python
-# scripts/conflict_detector.py
-def detect_conflicts(new_feature_description):
-    """
-    掃描 specs/ 確認新功能不衝突現有 invariants
-    """
-    relevant_specs = search_specs(new_feature_description)
-    for spec in relevant_specs:
-        conflicts = check_invariant_violations(new_feature_description, spec)
-        if conflicts:
-            return ConflictReport(spec_id=spec.id, conflicts=conflicts)
-    return None
-```
+Tier mapping 是 deterministic、可稽核規則。T1 仍需依風險抽樣 review；misclassification、revert、incident、scope escape 或 human amendment 超過 policy threshold 時，規則必須收緊至 T2，而不是由模型自行放寬。
 
-常見衝突類型：
-- 與現有 `INV:` invariant 衝突
-- 與現有 API contract 版本衝突
-- 與現有 UI State Contract 的狀態機衝突
+## Dispatch and isolation
 
-### Admit-3：Tier 分類（Tier Classification）
+`ADMIT(tier)` 後才配置 `WT:*` worktree、agent role 和 time/token budget。Worktree isolation 是 repository correctness boundary；sandbox isolation 是 process-level filesystem/network boundary。兩者皆不等於 identity、authorization、data classification 或 supply-chain control。
 
-決定 Autonomy Tier：
+role-conditional test/implementation separation、worktree write attestation 與 sandbox policy snapshot 應在 agent control plane 之外產生可驗證 evidence。現有 repository shadow 描述目標 contract，並不宣稱所有 target project 已具備 per-role container isolation。
 
-```
-新需求 → 是否涉及 schema migration / auth / pricing？
-  YES → T3（人工審核必須，禁止 auto-dispatch）
-  NO  → 是否有規格變更或新 domain entity？
-          YES → T2（auto-PR + human review）
-          NO  → T1（auto-PR）
-  
-不確定 → T2（預設）
-```
+## 與 `GATE:SPEC` 的交界
 
-### Admit-4：Delta Spec 建立（Spec Kickoff）
+| `GATE:ADMIT` | `GATE:SPEC` |
+|---|---|
+| 輸入是 signal 與 raw context；輸出是 Change Intent、provisional profile、tier 和 dispatch provenance。 | 輸入是 Change Intent；輸出是已核准的 Delta Spec、Impact Analysis、Stable IDs、applicability 和 evidence plan。 |
+| 決定可否建立/派發變更工作。 | 決定變更是否已可進入 independent test generation 與 implementation。 |
 
-Admit 通過後，建立 Delta Spec 套件骨架：
-
-```bash
-# scripts/new_cr.sh <CR-ID> "<title>"
-CR_ID=$1
-TITLE=$2
-
-mkdir -p "changes/$CR_ID"
-cat > "changes/$CR_ID/intent.md" <<EOF
-# $CR_ID — $TITLE
-
-## 變更意圖
-（待填入）
-
-## 動機
-（待填入）
-EOF
-
-cat > "changes/$CR_ID/delta.yaml" <<EOF
-id: "$CR_ID"
-title: "$TITLE"
-tier: "T2"          # 預設 T2，確認後修改
-status: "draft"
-EOF
-
-echo "ADMIT:$CR_ID" >> .vdd/admit-queue
-```
-
----
-
-## Dispatch 決策矩陣
-
-GATE:ADMIT 通過後的分派路由：
-
-| Tier | Admit 狀態 | 行動 |
-|------|-----------|------|
-| T1 | 完整資訊 | 直接 dispatch agent → GATE:SPEC |
-| T2 | 完整資訊 | dispatch agent → GATE:SPEC + 設定 PR review 規則 |
-| T3 | 完整資訊 | **停止**，等待人工 review + 明確授權 |
-| 任何 | 資訊不足 | 回到 Discovery，繼續問問題 |
-
----
-
-## ADMIT 狀態機
-
-```
-raw_request
-    ↓
-ADMIT:DISCOVERING    ← 問題清單未完整回答
-    ↓（問題已回答）
-ADMIT:CONFLICT_CHECK ← 掃描現有 specs 衝突
-    ↓（無衝突）
-ADMIT:TIER_ASSIGNED  ← Tier 分類完成
-    ↓
-ADMIT:SPEC_KICKOFF   ← Delta Spec 骨架建立
-    ↓
-ADMIT:DISPATCHED     ← 進入 GATE:SPEC
-```
-
----
-
-## Admit Queue 管理
-
-`.vdd/admit-queue` 記錄待處理的 ADMIT items：
-
-```
-ADMIT:2026-001   # 手機登入
-ADMIT:2026-002   # 訂單取消功能
-ADMIT:2026-003   # 報表匯出
-```
-
-Agent 每次啟動時可以：
-
-```bash
-# 查看待處理的 ADMIT items
-cat .vdd/admit-queue
-
-# 查看特定 CR 的 Admit 狀態
-cat changes/CR:2026-007/intent.md
-cat changes/CR:2026-007/delta.yaml
-```
-
----
-
-## Admit 清單模板（`ADMIT:ID` spec 格式）
-
-```yaml
-id: "ADMIT:2026-001"
-raw_request: "讓使用者可以用手機登入"
-
-# 4 個 Admit 活動狀態
-discovery:
-  status: "complete"
-  questions_answered: 5
-  answers_file: "changes/CR:2026-007/discovery-answers.md"
-
-conflict_check:
-  status: "complete"
-  conflicts_found: 0
-  checked_against: ["INV:AUTH-ONE-SESSION-PER-USER", "API:USER-V2"]
-
-tier:
-  assigned: "T2"
-  reason: "新增 domain entity（PhoneOTP），需 human review"
-
-spec_kickoff:
-  status: "complete"
-  cr_id: "CR:2026-007"
-  delta_spec_path: "changes/CR:2026-007/"
-
-dispatch:
-  status: "dispatched"
-  dispatched_at: "2026-06-26T09:00:00Z"
-  target_gate: "GATE:SPEC"
-```
-
----
-
-## 與 GATE:SPEC 的邊界
-
-| | GATE:ADMIT | GATE:SPEC |
-|---|-----------|----------|
-| **輸入** | 原始需求（自然語言）| Canonical Spec 草稿 |
-| **輸出** | 可以開始寫規格的確認 | 完整 .feature 文件 |
-| **強制等級** | prompt-only | runtime hook |
-| **執行者** | PM + Agent 協作 | 純 Agent |
-| **目標** | 需求完整性 + Tier 分類 | 規格完整性 |
-
----
-
-*本章對應 Notion 頁面 14 · Discovery & Dispatch Loop（GATE:ADMIT 上游閘門）*
+相關 contract：[`governance/gates/admit.yaml`](../governance/gates/admit.yaml)、[07｜Canonical Pipeline](07-canonical-pipeline.md)、[13｜Self-Healing CI](13-self-healing-ci.md)。

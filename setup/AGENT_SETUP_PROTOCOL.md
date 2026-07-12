@@ -30,6 +30,10 @@ Human reference：[docs/00-canonical-glossary.md](../docs/00-canonical-glossary.
 
 ```yaml
 confirm_mode_checklist:
+  - id: "CM-00"
+    check: "authority manifest 與 task-relevant governance contracts 存在"
+    command: "test -f governance/manifest.yaml && test -d governance/gates && test -d governance/profiles"
+
   - id: "CM-01"
     check: "CLAUDE.md 已載入，理解所有閘門規則"
     verify: "回答：VDD 代表什麼？GATE:RED 強制等級是什麼？"
@@ -54,6 +58,10 @@ confirm_mode_checklist:
   - id: "CM-06"
     check: "red-verifier subagent 存在"
     command: "ls .claude/agents/red-verifier.md"
+
+  - id: "CM-07"
+    check: "System／Change Profile、Evidence 與 Release contract 可載入"
+    command: "test -f governance/profiles/system.yaml && test -f governance/profiles/change.yaml && test -f governance/gates/vdd.yaml && test -f governance/gates/deploy.yaml"
 ```
 
 **任何項目 FAIL → 進入 Configure Mode 執行對應 Phase**
@@ -82,6 +90,16 @@ sudo cp setup/templates/managed-settings.json \
 mkdir -p specs/{domain,features,contracts/{api,ui},quality,decisions,traceability}
 mkdir -p .vdd/red
 [ -f .vdd/phase ] || echo "INIT" > .vdd/phase
+```
+
+若是從本 template 手動套用，還必須複製 agent 指令所引用的 authority artifacts：
+
+```bash
+cp -R <this-repo>/governance ./governance
+mkdir -p generated scripts
+cp <this-repo>/generated/notion-canonical-view.md generated/
+cp <this-repo>/scripts/governance.py scripts/
+cp <this-repo>/requirements-governance.txt .
 ```
 
 ### P2：Hook Scripts
@@ -128,12 +146,12 @@ echo '{"tool_name":"Edit","tool_input":{"file_path":"src/test.py"}}' | \
 
 | Gate | 觸發 | 強制等級 | 通過條件 |
 |------|------|---------|---------|
-| GATE:ADMIT | 新需求 | prompt-only | 需求資訊完整 + Tier 確認 |
-| GATE:SPEC | 寫實作前 | **runtime** | `.feature` 存在且非空 |
-| GATE:RED | 進入實作前 | **runtime** | `.vdd/phase = RED_VERIFIED` |
-| GATE:GREEN | session 結束前 | **runtime（Stop）** | pytest + ruff 全通過 |
-| GATE:VDD | merge 前 | config/流程 | 覆蓋率 + 突變測試 + 整合測試 |
-| GATE:DEPLOY | 部署後 | 架構外建 | Telemetry 閉環 |
+| GATE:ADMIT | Signal 形成 Change Intent 前 | deterministic policy + target hooks | source/trust/provenance/dedup/tier/queue/DoR 都通過；不是第六道 Gate |
+| GATE:SPEC | 寫實作前 | profile policy + target runtime hook | Delta/Impact/Stable ID/profile/applicable contracts/evidence plan 完整 |
+| GATE:RED | Independent test 後 | target runtime hook + profile policy | FEATURE/DEFECT baseline-red，或其他 profile 的 accepted alternative evidence |
+| GATE:GREEN | 實作後 | target Stop hook + profile policy | required tests、static analysis、lint/type/build、protected-test integrity；TIA 不得弱化 full regression |
+| GATE:VDD | merge/release 前 | profile-resolved quality contract | applicable quality evidence 和有效 waiver 完整 |
+| GATE:DEPLOY | 受控發布前 | release policy / external platform | Release Profile、rollout、observation、rollback、provenance/runbook 就緒 |
 
 ---
 
@@ -155,12 +173,14 @@ Agent 完成 Confirm Mode 後，輸出：
 
 ```
 CONFIRM MODE RESULT:
+  CM-00: PASS — governance manifest/gates/profiles 存在，authority state 已讀取
   CM-01: PASS — VDD = Verification & Validation-Driven Dev, GATE:RED = runtime 強制
   CM-02: PASS — managed-settings.json 存在
   CM-03: PASS — .vdd/phase = RED_VERIFIED
   CM-04: PASS — 6 個 hook scripts 存在
   CM-05: PASS — hooks: PreToolUse, Stop, UserPromptSubmit, PostToolUse, SessionStart
   CM-06: PASS — red-verifier.md 存在
+  CM-07: PASS — profile、VDD 與 deploy contracts 可載入
 
 ENVIRONMENT STATUS: READY
 NEXT ACTION: 可以開始接受任務
@@ -189,3 +209,5 @@ BLOCKED: 環境未就緒，無法開始任務
 | [docs/07-canonical-pipeline.md](../docs/07-canonical-pipeline.md) | Pipeline 權威定義 |
 | [docs/10-claude-code-implementation.md](../docs/10-claude-code-implementation.md) | 實作細節 |
 | [docs/12-ai-agent-readiness-gate.md](../docs/12-ai-agent-readiness-gate.md) | Readiness Gate 完整清單 |
+| [docs/24-system-change-profiles.md](../docs/24-system-change-profiles.md) | assertion applicability 與 risk tailoring |
+| [docs/21-evidence-provenance-audit-contract.md](../docs/21-evidence-provenance-audit-contract.md) | Evidence Envelope 與 audit boundary |

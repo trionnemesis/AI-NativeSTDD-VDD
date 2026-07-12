@@ -1,5 +1,7 @@
 # 09 · AI Agent CLI 評估（Agent CLI Evaluation）
 
+> **Status: Implementation/reference snapshot.** 工具 capability、版本與 enforcement claim 必須按日期重新驗證；Notion root／09 與 authority manifest 優先於本頁，且本頁不是 runtime conformance evidence。
+
 ---
 
 ## 概述

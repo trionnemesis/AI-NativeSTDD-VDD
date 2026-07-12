@@ -1,5 +1,7 @@
 # 04 · UI State Contract（UI 狀態契約）
 
+> **Repository human-reference snapshot**：Notion root／04 是 UI contract 的 canonical source。UI assertions 的適用性由 System／Change Profile 解析；衝突時以 Notion 為準。
+
 ---
 
 ## 概述

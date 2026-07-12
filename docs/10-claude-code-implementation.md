@@ -1,5 +1,7 @@
 # 10 · Claude Code 具體實作（Implementation）
 
+> **Status: Implementation/reference snapshot.** 本頁的 Claude Code capability 與 hook behavior 必須在 target environment 以 Confirm Mode 重驗；Notion canonical contracts 與 `governance/manifest.yaml` 的 authority state 優先。
+
 ---
 
 ## 概述
@@ -257,6 +259,8 @@ if data.get("stop_hook_active"):
 ---
 
 ## 狀態更新範例
+
+`.vdd/phase` 是此 Claude Code 相容性實作的狀態提示；它不能單獨證明 profile-resolved `GATE:VDD`、`GATE:DEPLOY`、Evidence Envelope 或 Production Verification 已通過。以 target environment 的 Confirm Mode、policy 和可重跑 artifact 為準。
 
 ```bash
 # agent 完成 RED 驗證後手動更新 phase

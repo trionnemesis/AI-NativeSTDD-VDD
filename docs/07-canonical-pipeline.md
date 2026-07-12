@@ -1,237 +1,78 @@
-# 07 · Canonical Pipeline（權威 CI/CD Pipeline）
+# 07 · Canonical Pipeline（端到端執行流程）
 
-> **MCR:2026:004 shadow notice**：本頁是 human-reference snapshot。Machine-readable contracts 位於 `governance/gates/`；正式 cutover 前，Notion 07／05 仍是 authority。固定序列仍為 `GATE:SPEC→RED→GREEN→VDD→DEPLOY`。
+> **Authority boundary**：此頁是 [Notion 07｜端到端執行流程與落地清單](https://app.notion.com/p/382f5b2d1a9081ea8de4d42a6f8bdabc) 的 repository human reference。Notion 07 是唯一 canonical 12-step／5-Gate 序列；repository 的 [`governance/gates/`](../governance/gates/) 僅是 non-authoritative shadow。
 
----
+## 固定序列
 
-## 5 閘門完整流程
-
-```
-GATE:ADMIT ──▶ GATE:SPEC ──▶ GATE:RED ──▶ GATE:GREEN ──▶ GATE:VDD ──▶ GATE:DEPLOY
-   上游            #1            #2            #3            #4            #5
-  探索分派         規格           紅燈          綠燈          驗證         部署確認
+```text
+GATE:SPEC → GATE:RED → GATE:GREEN → GATE:VDD → GATE:DEPLOY
 ```
 
----
+五道 Gate 的順序與數量不可由 agent 改寫。`GATE:ADMIT` 是上游 admission control；`GATE:REGRESSION` 是 agent-workflow configuration 的 auxiliary gate；兩者都不是第六道 pipeline Gate。
 
-## GATE:ADMIT（探索分派循環，上游閘門）
+## Canonical 12 steps
 
-**位置**：GATE:SPEC 的上游，獨立運作  
-**觸發**：任何新需求、問題回報、功能請求  
-**強制等級**：prompt-only
-
-詳見 [14-discovery-dispatch-loop.md](14-discovery-dispatch-loop.md)
-
----
-
-## GATE:SPEC — #1
-
-**強制等級：runtime（PreToolUse hook）**
-
-```
-條件:
-  specs/features/<module>.feature 存在且非空
-
-Hook: pre_impl_gate.py
-  - 攔截 Edit|Write 到 src/**
-  - 確認對應 .feature 存在
-  - exit 2 → 阻擋操作
-
-AI Agent 動作:
-  1. 確認 REQ/BDD IDs 存在於 specs/
-  2. 若無 → 建立 spec 後再進行
-  3. 不得在無 spec 情況下繞過
+```text
+1. Change Intent
+2. Delta Spec
+3. Impact Analysis
+4. GATE:SPEC
+5. Independent Test Generation
+6. GATE:RED
+7. AI Implementation
+8. GATE:GREEN
+9. GATE:VDD
+10. Traceability Generation
+11. Controlled Deployment
+12. Production Verification → Change Intent / Accepted Evidence
 ```
 
----
+每個 Gate 執行前先解析 `System Profile + Change Profile + risk tier + policy version`。任何 `not_applicable` assertion 都必須由 profile policy 決定、保留 reason code 與 alternative evidence；高風險 assertion 不能由 implementation agent 自行標記為 N/A。
 
-## GATE:RED — #2
+## Gate contracts
 
-**強制等級：runtime（PreToolUse hook）**
+| Gate | 進入條件與必須 evidence | 拒絕條件 |
+|---|---|---|
+| `GATE:SPEC` | Change Intent、Delta Spec、Impact Analysis、Stable ID、profile resolution、適用的 domain/BDD/UI/API/quality/release contract，以及 evidence plan。 | 規格不完整、相容性未分類、profile applicability 未解決，或 evidence plan 缺失。 |
+| `GATE:RED` | FEATURE／DEFECT 的 baseline failure + requirement-matching oracle；REFACTOR、DEPENDENCY、DOC_CONFIG、MIGRATION、EMERGENCY 的 policy-accepted alternative evidence。 | 測試無失敗能力、failure 不對應 requirement、整個 SUT 被 mock，或 test actor 可讀新 implementation solution。 |
+| `GATE:GREEN` | profile-resolved tests、static analysis、lint/type/build、flaky/quarantine policy、protected-test integrity，以及啟用 TIA 時的 selection/fallback evidence。 | 任何 required suite 失敗、選測削弱 nightly full regression，或 implementation agent 弱化測試／threshold／policy／fixture。 |
+| `GATE:VDD` | profile 適用的 mutation、performance、reliability、resilience、negative path、a11y/visual 與 security/privacy/authorization evidence。 | required quality evidence 缺失、過期或無法重跑；waiver 無效或已過期。 |
+| `GATE:DEPLOY` | Release Profile、migration compatibility、controlled rollout、observation window、promotion/abort/rollback、smoke test、SBOM/provenance/signature、dashboard/alert/runbook。 | release 不可安全控制、無可執行 rollback/forward-fix，或 observation/operational evidence 無法歸因。 |
 
-```
-條件:
-  .vdd/phase = RED_VERIFIED
+`GATE:DEPLOY` 是**發布前**的 deployability gate。正式環境的 Production Verification 是下一層 operational validation：資料不足時結論為 `INCONCLUSIVE`，不是 PASS；security、privacy、authorization、compliance 也不能只靠「未告警」證明。
 
-Hook: pre_impl_gate.py（第二道檢查）
-  - 讀取 .vdd/phase
-  - 若非 RED_VERIFIED 或 GREEN → exit 2
+## Upstream admission 與 auxiliary evaluation
 
-AI Agent 動作:
-  1. 委派 red-verifier subagent
-  2. subagent 執行:
-     a. pytest --co -k <test>（確認測試存在）
-     b. pytest -k <test>（確認測試失敗）
-  3. 存 .vdd/red/<req-id>.json（Red Evidence）
-  4. 更新 .vdd/phase → RED_VERIFIED
-
-注意: --co 和實跑是兩個步驟，不可合一
+```text
+Signal → fingerprint → deterministic dedup → LLM-assisted classification
+       → GATE:ADMIT → tiered dispatch (role × worktree × budget)
+       → Change Intent → canonical pipeline
 ```
 
-`.vdd/phase` 狀態機：
+- `GATE:ADMIT` 保留來源身份、trust label、provenance、queue budget、tier decision 與 dispatch assignment；LLM 不得是唯一 admission authority。
+- Test Impact Analysis（TIA）只在 `GATE:GREEN` 選擇本次測試集合；它不改寫 Gate，也不設 `GATE:TIA`。
+- `GATE:REGRESSION` 以 Golden Tasks 和可重放 evidence 檢查 prompt、model、memory、routing、tool policy、guardrail 的組態變更；它的被測物不是產品功能。
 
-```
-INIT → SPEC_VERIFIED → RED_VERIFIED → GREEN → VDD_PASS → DEPLOYED
-```
+## 最小 Traceability
 
----
-
-## GATE:GREEN — #3
-
-**強制等級：runtime（Stop hook）**
-
-```
-條件:
-  pytest tests/ 全通過
-  ruff check . clean
-
-Hook: green_gate.py（Stop hook）
-  - 每次 agent 嘗試結束時觸發
-  - 若任一測試失敗或 lint 報錯 → block（繼續修）
-
-AI Agent 禁止:
-  - 弱化測試以通過此閘門
-  - 跳過測試（pytest.skip）
-  - 預期失敗（xfail）
-  - 空斷言（assert True）
+```text
+SIG:* → ADMIT:* → autonomy tier / dispatch / WT:* attestation
+      → System Profile + Change Profile + policy version
+      → REQ / INV / BDD / UI / API contract
+      → red-or-alternative EVID:* → test / quality evidence
+      → release / canary attribution → production observation
+      → Evidence Envelope index
 ```
 
----
+Evidence Envelope 必須能連結 policy、actor、tool/model、environment、hash、oracle、artifact、signature、retention 與 freshness。Notion 摘要或 agent 自述不是完整 evidence。
 
-## GATE:VDD — #4
+## 導入順序
 
-**強制等級：config/流程（CI pipeline + .vdd/phase）**
+1. Stable ID、System／Change Profile 與 Requirement-Test traceability。
+2. Delta Spec、Impact Analysis、compatibility/migration classification。
+3. Evidence Envelope、Red／alternative evidence、protected-test guard。
+4. changed-code mutation、flaky/hermetic policy、Critical Journey Quality Profile。
+5. Release Profile、controlled rollout、observation、rollback 與 supply-chain provenance。
+6. Production Signal、upstream admission 與受控回饋。
 
-```
-觸發: GATE:GREEN 通過後，CI 自動執行
-
-Pipeline 步驟:
-  1. pytest-cov: 覆蓋率 ≥ 80%
-  2. mutmut run: 突變測試 ≥ 80%
-  3. pytest -m integration: 整合測試
-  4. pact-verifier: Contract 測試
-  5. 產出 docs/vdd-report.md
-
-Pass → .vdd/phase → VDD_PASS
-Fail → CI fail，阻擋 merge
-```
-
----
-
-## GATE:DEPLOY — #5
-
-**強制等級：架構性外建（Claude Code 無法強制）**
-
-```
-觸發: 部署到 Production 後
-
-必要條件（需外建監控）:
-  - SLO 在 24h 視窗內達成
-  - 新增 Telemetry signals 有流量
-  - 錯誤率 < 閾值
-
-完成後:
-  .vdd/phase → DEPLOYED
-  寫入 ATTEST:<CR-ID>-DEPLOY 到 traceability
-```
-
----
-
-## CI Pipeline YAML 範例（GitHub Actions）
-
-```yaml
-# .github/workflows/stdd-vdd-pipeline.yml
-
-name: STDD×VDD Pipeline
-
-on:
-  pull_request:
-    branches: [main]
-
-jobs:
-  gate-spec:
-    name: "GATE:SPEC — Spec exists"
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v4
-      - name: Verify all src/ files have specs
-        run: python scripts/check_spec_coverage.py
-
-  gate-red:
-    name: "GATE:RED — Red evidence exists"
-    needs: gate-spec
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v4
-      - name: Verify red evidence for changed modules
-        run: python scripts/check_red_evidence.py
-
-  gate-green:
-    name: "GATE:GREEN — All tests pass"
-    needs: gate-red
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-python@v5
-        with:
-          python-version: '3.11'
-      - run: pip install -r requirements.txt
-      - run: pytest tests/ -v --tb=short
-      - run: ruff check .
-
-  gate-vdd:
-    name: "GATE:VDD — Quality gates"
-    needs: gate-green
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-python@v5
-        with:
-          python-version: '3.11'
-      - run: pip install -r requirements.txt
-
-      - name: Coverage
-        run: pytest tests/ --cov=src --cov-fail-under=80
-          --cov-report=json:coverage.json
-
-      - name: Mutation Testing
-        run: |
-          mutmut run --paths-to-mutate src/
-          python scripts/check_mutation_threshold.py --threshold 80
-
-      - name: Integration Tests
-        run: pytest tests/ -m integration -v
-        env:
-          DATABASE_URL: ${{ secrets.TEST_DATABASE_URL }}
-
-      - name: Contract Tests
-        run: pact-verifier --provider-base-url=http://localhost:8000
-          --pact-url=tests/contracts/
-
-      - name: Generate VDD Report
-        run: python scripts/generate_vdd_report.py
-
-      - uses: actions/upload-artifact@v4
-        with:
-          name: vdd-report
-          path: docs/vdd-report.md
-```
-
----
-
-## Phase 狀態檔（`.vdd/phase`）
-
-`.vdd/phase` 是狀態機的持久化儲存，hook scripts 讀取此檔案：
-
-```
-INIT                ← 初始狀態
-SPEC_VERIFIED       ← GATE:SPEC 通過
-RED_VERIFIED        ← GATE:RED 通過（red evidence 存在）
-GREEN               ← GATE:GREEN 通過（測試全過）
-VDD_PASS            ← GATE:VDD 通過（CI 確認）
-DEPLOYED            ← GATE:DEPLOY 通過（Telemetry 確認）
-```
-
----
-
-*本章是 STDD×VDD pipeline 的權威定義文件（Notion 頁面 07）*
+相關 machine contracts：[`governance/gates/`](../governance/gates/)、[`governance/profiles/`](../governance/profiles/)、[`governance/examples/`](../governance/examples/)。它們在 shadow mode 只提供 comparison material，不證明 target environment 已 enforcement。

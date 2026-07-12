@@ -1,5 +1,7 @@
 # 08 · 業界方法論比較（Industry Comparison）
 
+> **Status: Informative dated assessment.** 此頁的工具能力、數字與比較只在其 assessment date/evidence basis 下成立；目前有效性與閱讀順序見 [26｜Assessment Archive](26-assessment-archive.md)。它不是 canonical contract 或 runtime enforcement 證明。
+
 ---
 
 ## 概述

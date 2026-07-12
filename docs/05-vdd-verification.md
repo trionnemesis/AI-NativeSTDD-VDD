@@ -1,177 +1,60 @@
-# 05 · VDD 驗證體系（Verification & Validation）
+# 05 · 品質屬性與 VDD 驗證（Verification & Validation）
 
----
+> **Authority boundary**：此頁是 [Notion 05｜品質屬性與 VDD 驗證](https://app.notion.com/p/382f5b2d1a9081e685aefd82374b29ca) 的 repository human reference。可執行 shadow contract 位於 [`governance/gates/vdd.yaml`](../governance/gates/vdd.yaml)；衝突時以 Notion 為準。
 
-## VDD 的定義（再次確認）
+## VDD 的定義與邊界
 
-> **VDD = Verification & Validation-Driven Development**
+**VDD = Verification & Validation-Driven Development**。它在 `GATE:GREEN` 後，以 machine-checkable evidence 檢查品質屬性，並在 release 後用 Production Telemetry 驗證 operational quality assumptions。
 
-- **Verification**（驗證）：「我們是否正確地建造了系統？」— 機器可驗證的品質指標
-- **Validation**（確效）：「我們是否建造了正確的系統？」— Production Telemetry 確認
+- **Verification**：系統是否符合已核准的品質、復原與負向行為契約？
+- **Validation**：在可歸因的正式環境觀測中，operational quality assumptions 是否成立？
+- **不是**：Value-Driven Development、Vulnerability-Driven Development，或只看 coverage 的 CI step。
 
-**重申：VDD ≠ Value-Driven，≠ Vulnerability-Driven**
+Production Telemetry 對 performance、reliability、resilience 與 user impact 是重要的實環境證據；它不能單獨證明 security、privacy、authorization 或 compliance。
 
----
+## Gate position
 
-## VDD 閘門觸發時機
-
-```
-GATE:GREEN 通過後
-      ↓
-VDD Pipeline 啟動（CI 自動觸發）
-      ↓
-VDD Report 產出
-      ↓
-GATE:VDD ← Pass/Fail
-      ↓（Pass）
-GATE:DEPLOY 準備
+```text
+GATE:GREEN → GATE:VDD → GATE:DEPLOY → Production Observation
 ```
 
----
+`GATE:VDD` 是固定五道 Gate 的第四道。`GATE:DEPLOY` 通過只代表具備受控發布條件；production observation 仍可能產生新的 `SIG:*`，進入下一輪 Change Intent。
 
-## VDD 品質層（4 維度）
+## 以 profile 解析的品質證據
 
-### 維度 1：覆蓋率（Coverage）
+每次驗證前，先解析 System Profile、Change Profile、risk tier 與 assertion applicability。`not_applicable` 必須帶 policy reason code 與 alternative evidence，不能當作 skip。
 
-```yaml
-# specs/quality/coverage.yaml
-thresholds:
-  line: 80
-  branch: 75
-  function: 85
-scope: "src/**/*.py"
+| 證據類別 | 適用時的最低要求 |
+|---|---|
+| Failure capability | FEATURE／DEFECT 保有 Red Evidence；其他變更型別保有 policy-accepted characterization、compatibility 或替代 evidence。 |
+| Test strength | profile 適用時以 mutation 或等效 evidence 檢查 assertion strength；不得只因測試全綠就跳過。 |
+| Performance／reliability／resilience | 明確的 measurement location、environment、load、percentile、threshold、timeout/retry/recovery 和可重跑 artifact。 |
+| Negative path | failure-path、error handling、rollback/recovery 與依 System Profile 的 edge case evidence。 |
+| UI surfaces | 有 UI 時的 a11y automated evidence、必要 human review 與 visual regression。 |
+| Security／privacy／authorization | 適用的 policy、design review、scan、attestation 與獨立裁決；waiver 必須有效、有限期且有補償控制。 |
+| Evidence integrity | 每次結果以 Evidence Envelope 記錄 subject、change、policy、actor、tool/model、environment、hash、oracle、artifact、signature、retention 與 freshness。 |
+
+Coverage、integration、contract 與 mutation testing 都可以是適用的 evidence，但任何固定百分比或工具選擇必須由 project quality policy 定義，不能取代 profile-resolved contract。
+
+## VDD pass/fail semantics
+
+`GATE:VDD` 應產出可重跑、可稽核的結果，而不是「agent 已完成」的敘述。
+
+```text
+PASS  = 所有 required assertions 有有效 evidence；任何 N/A 有 policy reason 與 alternative evidence。
+FAIL  = required evidence 缺失、過期、未能重跑、違反門檻，或 waiver 無效／過期。
+INCONCLUSIVE = observation window 或資料量不足；不得被當作 PASS。
 ```
 
-**工具**：`pytest-cov`、`coverage.py`
+實作 Agent 不得透過修改測試、threshold、policy、fixture 或 quarantine 使 `GATE:VDD` 看似通過。需要例外時，依 [19｜Governance Lifecycle、Waiver 與 Break-glass](19-governance-lifecycle-waiver-break-glass.md) 建立有限期、獨立核准的 `WAIVER:*`。
 
-```bash
-pytest tests/ --cov=src --cov-report=json:coverage.json \
-  --cov-fail-under=80
-```
+## Production validation
 
-### 維度 2：突變測試（Mutation Testing）
+Release 後 evidence 必須能連結 release/canary attribution、observation window、control/baseline、promotion/abort/rollback decision 和目前有效的 waiver。沒有告警、成功部署或單一 SLO 達標都不是完整品質結論。
 
-目的：確保測試**真的在測試**，而非只是執行到程式碼。
+相關頁面：
 
-```yaml
-# specs/quality/mutation.yaml
-id: "QP:MUTATION-001"
-tool: "mutmut"
-scope: "src/"          # 全域（changed-code 優先）
-threshold: 80          # escaped mutant < 20%
-critical_domains:      # 必須 100% kill
-  - "src/auth/"
-  - "src/payments/"
-```
-
-Escaped mutant 處理規則：
-- 非 critical domain：記錄 disposition（`ATTEST:MUTANT-<id>-ACCEPTED` + 理由）
-- Critical domain：**必須修正測試，不允許豁免**
-
-```bash
-mutmut run --paths-to-mutate src/
-mutmut results  # 查看 escaped mutants
-```
-
-### 維度 3：整合測試（Integration Tests）
-
-針對系統邊界（資料庫、外部 API、事件佇列）：
-
-```python
-# tests/integration/test_user_service.py
-# REQ: REQ:USER-LOGIN-001
-# 整合測試：不 mock 資料庫
-
-@pytest.mark.integration
-def test_login_persists_session(real_db, real_redis):
-    """BDD:LOGIN-001 登入後 session 確實寫入 Redis"""
-    user = create_test_user(real_db, email="test@example.com")
-    response = login(real_db, real_redis, email="test@example.com",
-                     password="correct")
-    assert response.status_code == 200
-    session_key = f"session:{response.json()['token']}"
-    assert real_redis.exists(session_key)
-```
-
-### 維度 4：Contract Testing
-
-```bash
-# Pact 合約測試
-pytest tests/contracts/ -v
-pact-verifier --provider-base-url=http://localhost:8000 \
-  --pact-url=tests/contracts/user-v2.pact.json
-```
-
----
-
-## VDD Report 格式
-
-CI 產出 `docs/vdd-report.md`：
-
-```markdown
-# VDD Report — CR:2026-007
-
-**日期**: 2026-06-26
-**Commit**: abc1234
-
-## Summary
-| 維度 | 結果 | 閾值 | Pass/Fail |
-|------|------|------|-----------|
-| Coverage (line) | 83% | 80% | ✅ PASS |
-| Coverage (branch) | 77% | 75% | ✅ PASS |
-| Mutation Score | 82% | 80% | ✅ PASS |
-| Integration Tests | 45/45 | all | ✅ PASS |
-| Contract Tests | 3/3 | all | ✅ PASS |
-
-## Mutation Testing
-- Total mutants: 156
-- Killed: 128 (82%)
-- Escaped: 28 (18%)
-- Critical domain escaped: 0 ✅
-
-## Escaped Mutants Disposition
-| Mutant ID | File | Disposition | Reason |
-|-----------|------|-------------|--------|
-| MUTANT-042 | src/utils/format.py:L23 | ACCEPTED | 純格式函數，無業務邏輯 |
-
-## Attestation
-ATTEST:CR-2026-007-VDD — 2026-06-26T10:30:00Z
-Attested by: CI/CD pipeline (SHA: abc1234)
-```
-
----
-
-## Telemetry 閉環（Validation 層）
-
-VDD 的最終仲裁者是 Production Telemetry，但這超出 Claude Code 的執行範疇：
-
-```yaml
-# verification-plan.yaml 中的 telemetry_signals
-telemetry_signals:
-  - signal: "SIG:USER_LOGGED_IN"
-    slo: "error_rate < 1%"
-    validation_window: "24h after deploy"
-    owner: "oncall"
-```
-
-監控工具：Datadog、Grafana、Prometheus（需外建）
-
----
-
-## Attestation 記錄
-
-每個 VDD 通過的 CR 必須有 Attestation：
-
-```yaml
-# specs/traceability/matrix.yaml
-- req_id: "REQ:USER-LOGIN-001"
-  attest_id: "ATTEST:LOGIN-001-VDD"
-  attested_at: "2026-06-26T10:30:00Z"
-  vdd_pass: true
-  telemetry_validated: true
-  notes: "Production 24h SLO 確認通過"
-```
-
----
-
-*本章對應 Notion 頁面 05 · VDD 驗證體系*
+- [07｜Canonical Pipeline](07-canonical-pipeline.md)
+- [21｜Evidence、Provenance 與 Audit Contract](21-evidence-provenance-audit-contract.md)
+- [22｜Release Safety 與 Production Verification](22-release-safety-production-verification.md)
+- [24｜System／Change Profiles 與風險式裁剪](24-system-change-profiles.md)

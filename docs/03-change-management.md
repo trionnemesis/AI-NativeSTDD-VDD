@@ -1,5 +1,7 @@
 # 03 · 變更管理（Change Management）
 
+> **Repository human-reference snapshot**：Notion root／03 是 Delta Spec 與 Impact Analysis 的 canonical source。System／Change Profile、Evidence Envelope 與 Release Profile 的目前規範另見 [24](24-system-change-profiles.md)、[21](21-evidence-provenance-audit-contract.md)、[22](22-release-safety-production-verification.md)。
+
 ---
 
 ## Delta Spec 變更套件
@@ -132,6 +134,8 @@ Feature: 電話號碼登入
 
 ## verification-plan.yaml 格式
 
+下列 YAML 是示意。實際 required assertions、thresholds、test suites、release/observation evidence 必須由 System／Change Profile 與 policy version 解析；`not_applicable` 需 reason code 與 alternative evidence，不能用自由文字略過。
+
 ```yaml
 id: "CR:2026-007-VDP"
 linked_cr: "CR:2026-007"
@@ -169,9 +173,9 @@ telemetry_signals:
 ```
 建立 CR:ID → 填寫 Delta Spec 套件
       ↓
-T3？ → 人工審核（必須）
-T2？ → auto-PR + human review（必須）
-T1？ → auto-PR（無需 review）
+T3？ → human-written Change Intent；禁止 auto-dispatch
+T2？ → auto-dispatch + draft PR + human review（預設）
+T1？ → low-severity dependency/lint/doc drift 才可 auto-dispatch + propose PR；仍需 worktree attestation
       ↓
 GATE:SPEC 更新：合入新 spec 檔案
       ↓
@@ -181,9 +185,11 @@ GATE:GREEN：實作完成
       ↓
 GATE:VDD：verification-plan 執行
       ↓
-GATE:DEPLOY：Telemetry 閉環
+GATE:DEPLOY：Release Profile、controlled rollout、observation/rollback/provenance 就緒
       ↓
-ATTEST:CR-<ID>-VDD 寫入 traceability
+Controlled Deployment → Production Verification → Accepted Evidence 或新的 SIG:*
+      ↓
+EVID:* Envelope index 寫入 traceability
 ```
 
 ---

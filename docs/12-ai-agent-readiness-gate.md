@@ -1,5 +1,7 @@
 # 12 · AI Agent 就緒閘門（AI Agent Readiness Gate）
 
+> **Authority boundary**：本頁與 [`setup/AGENT_SETUP_PROTOCOL.md`](../setup/AGENT_SETUP_PROTOCOL.md) 提供 human-readable readiness guidance。Notion root、07、21、24 仍是 canonical contracts；只有 Confirm Mode 的實測結果才能宣稱 target environment 已 enforcement。
+
 ---
 
 ## 概述
@@ -7,6 +9,20 @@
 AI Agent Readiness Gate 是在把任何任務分派給 AI agent 執行之前，確認環境已正確設定的前置檢查機制。
 
 這等同於 Configure Mode 的 7 phase 驗證序列（P0–P6），但以 agent 視角來描述。
+
+## MCR:2026:004 authority preflight
+
+在 hooks 或 `.vdd/phase` 檢查之前，先確認：
+
+```bash
+test -f governance/manifest.yaml
+test -d governance/gates
+test -d governance/profiles
+test -f governance/gates/vdd.yaml
+test -f governance/gates/deploy.yaml
+```
+
+讀取 `governance/manifest.yaml` 的 authority state，並依任務載入 System／Change Profile、Evidence 與 Release contracts。`SHADOW_NON_AUTHORITATIVE` 表示 Notion 仍為 canonical，不能因本機檔案存在就宣稱 cutover 或完整 runtime enforcement。
 
 ---
 
