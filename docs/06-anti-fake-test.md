@@ -1,5 +1,7 @@
 # 06 · 防偽測試策略（Anti-Fake Test）
 
+> **Repository human-reference snapshot**：Notion 06 是 anti-fake-test 的 canonical source。FEATURE／DEFECT 需要 Red Evidence；其他 Change Profile 的替代 evidence 依 [24](24-system-change-profiles.md) 解析，不能用自由文字 N/A 取代。
+
 ---
 
 ## 問題：AI Agent 的假測試模式

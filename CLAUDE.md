@@ -24,7 +24,7 @@ Machine-readable shadow 位於 `governance/glossary.yaml`；以下只保留舊�
 | 術語 | 定義 |
 |------|------|
 | **STDD** | Specification & Test-Driven Development：以 Canonical Spec + 先寫測試作為 hard constraint |
-| **VDD** | Verification & Validation-Driven Development（**≠ Value-Driven，≠ Vulnerability-Driven**）：Green 後機器可驗證的品質閘門 |
+| **VDD** | Verification & Validation-Driven Development（**≠ Value-Driven，≠ Vulnerability-Driven**）：Green 後的 profile-resolved quality gate；Production Telemetry 僅驗證 operational quality assumptions，不是 security/privacy/authorization/compliance 的唯一證據 |
 | **Canonical Spec** | `specs/` 下的單一規格來源，包含 Stable ID |
 | **Red Evidence** | `.vdd/red/<req-id>.json`，證明測試在實作前失敗 |
 | **Delta Spec** | 變更套件，包含 intent.md、delta.yaml、impact.md、acceptance.feature |
@@ -38,32 +38,32 @@ Machine-readable shadow 位於 `governance/glossary.yaml`；以下只保留舊�
 GATE:SPEC → GATE:RED → GATE:GREEN → GATE:VDD → GATE:DEPLOY
 ```
 
-上游閘門（`GATE:ADMIT`）：任何需求在進入 GATE:SPEC 前必須通過探索分派循環。
+上游 `GATE:ADMIT` 把 Signal 經 deterministic admission、tiered dispatch 與 provenance 轉為 Change Intent；它不屬五道 Gate。`GATE:REGRESSION` 是 agent workflow configuration 的 auxiliary gate，也不改變此序列。
 
 ### GATE:SPEC（runtime 強制）
-- **條件**：對應 `specs/features/<module>.feature` 必須存在且非空
-- **強制**：PreToolUse hook，`sys.exit(2)` 阻擋 Edit/Write
+- **條件**：Change Intent、Delta Spec、Impact Analysis、Stable ID、System／Change Profile、適用 assertion 與 evidence plan 已解析
+- **強制**：已安裝 target 的 PreToolUse hook 可阻擋無 `.feature` 的 `src/` 寫入；其他 contract 是否 enforcement 以 Confirm Mode 與 target policy 為準
 - **禁止**：無 spec 寫任何 `src/` 下的實作檔
 
 ### GATE:RED（runtime 強制）
-- **條件**：`.vdd/phase` 必須為 `RED_VERIFIED`
+- **條件**：FEATURE／DEFECT 有 baseline failure；其他 Change Profile 有 policy-accepted alternative evidence
 - **強制**：PreToolUse hook
-- **禁止**：測試未失敗就開始實作
+- **禁止**：測試或替代 evidence 無失敗能力就開始實作；test actor 不可讀取新的 implementation solution
 - **必做**：委派 `red-verifier` subagent 執行，存 `.vdd/red/<req-id>.json`
 
 ### GATE:GREEN（runtime 強制）
-- **條件**：`pytest tests/` 全通過 + `ruff check .` clean
-- **強制**：Stop hook，未通過無法結束 session
+- **條件**：profile-resolved tests、static analysis、lint/type/build、protected-test integrity 均通過；啟用 TIA 時保留 selection/fallback evidence
+- **強制**：已安裝 target 的 Stop hook 可阻擋 `pytest tests/` 或 `ruff check .` 失敗；其餘 suite 依 target profile/policy
 - **禁止**：弱化/跳過/刪除測試以繞過此閘門
 
 ### GATE:VDD（config/流程）
-- **條件**：覆蓋率 ≥ 80%、突變測試通過、整合測試綠燈
-- **強制**：`.vdd/phase` 狀態機
-- **產出**：VDD Report（`docs/vdd-report.md`）
+- **條件**：適用的 mutation、performance、reliability、resilience、negative path、a11y/visual、security/privacy/authorization evidence 完整
+- **強制**：profile policy、Evidence Envelope 與 target CI/runner；不存在 single universal coverage/tool threshold
+- **產出**：可重跑的 quality evidence；waiver 必須有效、有限期且獨立核准
 
 ### GATE:DEPLOY（架構性外建）
-- **條件**：Production Telemetry 閉環確認（Claude Code 無法強制）
-- **說明**：需外建監控系統
+- **條件**：Release Profile、migration compatibility、controlled rollout、observation window、promotion/abort/rollback、supply-chain evidence 與 runbook 就緒
+- **說明**：這是發布**前**的 deployability gate；發布後的 Production Verification 仍需外建監控與 Evidence Envelope
 
 ---
 
@@ -88,9 +88,9 @@ GATE:SPEC → GATE:RED → GATE:GREEN → GATE:VDD → GATE:DEPLOY
 
 | Tier | 行為 | 適用場景 |
 |------|------|---------|
-| **T1** | 自動 PR，無 review | 文件更新、非破壞性修復 |
-| **T2**（預設） | 自動 PR + 強制 human review | 規格變更、新功能 |
-| **T3** | 禁止 auto-dispatch | schema migration、auth、pricing |
+| **T1** | auto-dispatch + draft/propose PR | low-severity `dependency_patch`、`lint`、`doc_drift`；先通過 worktree attestation，仍不得 direct merge |
+| **T2**（預設） | auto-dispatch + draft PR + 強制 human review | bug/performance regression 且不觸及 invariant；所有未命中 T1/T3 的情況 |
+| **T3** | human-written Change Intent；禁止 auto-dispatch | touches invariant、security、schema migration 或 uncorroborated high severity |
 
 **fallthrough = T2**。不確定時一律 T2。
 
@@ -113,6 +113,7 @@ GATE:SPEC → GATE:RED → GATE:GREEN → GATE:VDD → GATE:DEPLOY
 | `ADMIT:` | Discovery items |
 | `WT:` | Worktree IDs |
 | `ATTEST:` | Attestation records |
+| `EVID:` | Evidence Envelope records |
 | `TERM:` | Glossary terms |
 
 ---
@@ -123,6 +124,7 @@ GATE:SPEC → GATE:RED → GATE:GREEN → GATE:VDD → GATE:DEPLOY
 |------|------|------|
 | **runtime 強制** | hook/harness，模型不可繞過 | Stop hook, PreToolUse exit 2 |
 | **config/流程** | 狀態機，有條件可繞 | `.vdd/phase` |
+| **deterministic policy** | ruleset／profile resolver／admission contract，LLM 不得作唯一裁決 | dedup、tier assignment、assertion applicability |
 | **prompt-only** | 提示層，不保證遵從 | spec 語意正確性 |
 | **架構性外建** | Claude Code 做不到 | Telemetry 閉環 |
 
@@ -135,14 +137,14 @@ GATE:SPEC → GATE:RED → GATE:GREEN → GATE:VDD → GATE:DEPLOY
 
 ---
 
-## 九、Definition of Ready（實作前 6 項前提）
+## 九、Definition of Ready（實作前前提）
 
-1. `specs/features/<module>.feature` 存在且非空
-2. `specs/domain/<entity>.yaml` 定義 domain entity
-3. acceptance criteria 可機器驗證
-4. 相依 API contract 已鎖版
-5. T1/T2/T3 tier 已確認
-6. `.vdd/phase = RED_VERIFIED`（由 red-verifier 驗證）
+1. Change Intent、System／Change Profile、risk tier 與 assertion applicability 已解析。
+2. Delta Spec、Impact Analysis、Stable IDs 和適用 domain/BDD/UI/API/quality/release contract 已核准。
+3. acceptance criteria 與 Evidence Envelope 可機器驗證。
+4. 相容性、migration、deprecation、consumer impact 與 Release Profile 已分類。
+5. FEATURE／DEFECT 有 Red Evidence；其他 Change Profile 有 policy-accepted alternative evidence。
+6. `.vdd/phase = RED_VERIFIED` 僅是已安裝 Claude Code hook 的相容性狀態，不取代完整 profile/evidence contract。
 
 ---
 

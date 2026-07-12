@@ -60,6 +60,15 @@ else
     echo "  Copied docs/*.md"
   fi
 
+  if [ -d "$SCRIPT_DIR/governance" ]; then
+    mkdir -p "$TARGET/governance" "$TARGET/generated" "$TARGET/scripts"
+    cp -R "$SCRIPT_DIR/governance/." "$TARGET/governance/"
+    cp "$SCRIPT_DIR/generated/notion-canonical-view.md" "$TARGET/generated/"
+    cp "$SCRIPT_DIR/scripts/governance.py" "$TARGET/scripts/"
+    cp "$SCRIPT_DIR/requirements-governance.txt" "$TARGET/"
+    echo "  Copied governance shadow, generated view, validation script, and requirements"
+  fi
+
   mkdir -p "$TARGET/setup/templates"
   cp "$SCRIPT_DIR/setup/AGENT_SETUP_PROTOCOL.md" "$TARGET/setup/"
   cp "$SCRIPT_DIR/setup/templates/"*.json "$TARGET/setup/templates/"

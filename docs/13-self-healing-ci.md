@@ -1,5 +1,7 @@
 # 13 · 自癒 CI（Self-Healing CI）
 
+> **Status: Implementation/reference snapshot.** Self-Healing CI 位於 07 canonical pipeline 外的維運迴圈；只能 propose PR，不能直接 merge。版本敏感的工具能力與行為必須按 target/version 重新驗證。
+
 ---
 
 ## 概述

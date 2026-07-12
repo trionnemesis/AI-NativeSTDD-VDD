@@ -1,5 +1,7 @@
 # 01 · 方法論架構（Method Architecture）
 
+> **Repository human-reference snapshot**：目前 canonical authority 是 [Notion root](https://www.notion.so/AI-Native-STDD-VDD-382f5b2d1a9081e9a972f0b33fad3142)。本頁用於 human onboarding；衝突時以 Notion 與 `governance/manifest.yaml` 的 authority state 為準。
+
 ---
 
 ## 核心主張
@@ -15,7 +17,7 @@ STDD 的解法：把 Canonical Spec 作為 **constraint**，測試只是 spec �
 
 ```
 ┌──────────────────────────────────────────────┐
-│  Layer 5: Production Telemetry（最終仲裁）      │  ← GATE:DEPLOY
+│  Layer 5: Controlled Release + Production Observation │  ← GATE:DEPLOY（release-ready）
 ├──────────────────────────────────────────────┤
 │  Layer 4: VDD Verification（品質驗證）          │  ← GATE:VDD
 ├──────────────────────────────────────────────┤
@@ -59,20 +61,20 @@ STDD 的解法：把 Canonical Spec 作為 **constraint**，測試只是 spec �
 AI agent 的常見失敗模式：直接寫「通過的測試」，從未讓測試失敗。  
 Red Evidence 機制：測試執行失敗的 stdout 必須以 JSON 格式儲存，作為不可否認的紀錄。
 
-### 原則 3：VDD 是品質，不是安全漏洞偵測
+### 原則 3：VDD 是 profile-resolved 品質驗證，不是單一 CI 指標
 
-VDD 閘門的職責：
-- 覆蓋率指標（≥ 80%）
-- 突變測試（確保測試有效）
-- 整合測試（系統邊界）
-- Contract Testing（API 相容性）
+VDD 閘門依 System／Change Profile 收集適用的 evidence：
+- mutation 或等效 test-strength evidence
+- performance、reliability、resilience 與 negative-path verification
+- integration、contract、UI/a11y/visual evidence（依系統型態）
+- security、privacy、authorization evidence 與有效、有限期的 waiver
 
-不是：安全掃描、效能測試（雖可包含）
+Coverage、突變、整合與 contract testing 可以是 quality policy 的一部分，但固定門檻或工具不能取代 profile-resolved contract。
 
-### 原則 4：Telemetry 是最終仲裁者
+### 原則 4：Telemetry 是 operational quality 的最終實環境驗證
 
 所有 Gate 通過只代表「在已知條件下正確」。  
-Production Telemetry 才能確認「在真實流量下正確」。
+Production Telemetry 才能確認 performance、reliability、resilience 與 user-impact 假設是否在真實流量下成立；它不是 security、privacy、authorization 或 compliance 的唯一證明。
 
 ---
 
@@ -94,14 +96,14 @@ STDD×VDD 完全相容 DDD：
 ```
 新任務進入
     ↓
-是否涉及 schema migration / auth / pricing？
-    ↓ YES → T3（禁止 auto-dispatch）
+是否 touches invariant / security / schema migration，或 high severity 未被 deterministic evidence corroborate？
+    ↓ YES → T3（human-written Change Intent；禁止 auto-dispatch）
     ↓ NO
-是否有規格變更或新 domain entity？
-    ↓ YES → T2（auto-PR + human review）
+是否為 low-severity dependency_patch / lint / doc_drift？
+    ↓ YES → T1（auto-dispatch + propose PR；worktree attestation 必須先通過）
     ↓ NO
-是否純文件/非破壞性修復？
-    ↓ YES → T1（auto-PR）
+是否為 bug/performance regression 且不 touches invariant？
+    ↓ YES → T2（auto-dispatch + draft PR + mandatory human review）
     ↓ NO（不確定）→ T2（預設）
 ```
 

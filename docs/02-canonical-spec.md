@@ -1,5 +1,7 @@
 # 02 · Canonical Spec（規格格式）
 
+> **Repository human-reference snapshot**：Notion 02／root Canonical Glossary 是術語、registry 與 contract 的權威；本頁不取代 canonical authority。使用前先確認 [`governance/manifest.yaml`](../governance/manifest.yaml) 的 authority state。
+
 ---
 
 ## Canonical Spec 是什麼？
