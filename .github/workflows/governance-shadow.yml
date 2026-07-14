@@ -8,6 +8,10 @@ on:
       - "scripts/governance.py"
       - "tests/test_governance.py"
       - "requirements-governance.txt"
+      - ".claude/hooks/**"
+      - ".claude/settings.json"
+      - "setup/**"
+      - "tests/test_hooks.py"
       - ".github/workflows/governance-shadow.yml"
   push:
     branches: [main]
@@ -17,6 +21,10 @@ on:
       - "scripts/governance.py"
       - "tests/test_governance.py"
       - "requirements-governance.txt"
+      - ".claude/hooks/**"
+      - ".claude/settings.json"
+      - "setup/**"
+      - "tests/test_hooks.py"
 
 permissions:
   contents: read

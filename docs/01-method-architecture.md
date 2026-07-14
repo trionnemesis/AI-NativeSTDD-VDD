@@ -54,7 +54,7 @@ STDD 的解法：把 Canonical Spec 作為 **constraint**，測試只是 spec �
 需求 → Canonical Spec（REQ: + BDD:）→ 測試（紅）→ 實作 → 通過（綠）→ VDD 驗證
 ```
 
-沒有規格，agent 不允許寫任何 `src/` 下的檔案。
+沒有規格，agent 不允許寫任何 `.vdd/path-policy.json` 所宣告之 implementation root 下的檔案。`src/` 只是相容預設，不是方法論要求。
 
 ### 原則 2：Red Evidence 不可偽造
 
@@ -81,6 +81,8 @@ Production Telemetry 才能確認 performance、reliability、resilience 與 use
 ## Domain-Driven Design 整合
 
 STDD×VDD 完全相容 DDD：
+
+以下路徑使用 compatibility layout 作為範例；target 可用 path policy 對應到既有 repository layout。
 
 | DDD 概念 | STDD×VDD 對應 |
 |---------|--------------|

@@ -23,27 +23,27 @@
   "permissions": {
     "defaultMode": "plan",
     "deny": [
-      "Edit(./spec/**)",
       "Edit(./.git/**)",
+      "Edit(./.claude/hooks/**)",
       "Bash(curl *)",
-      "Bash(wget *)",
-      "Agent(*)"
+      "Bash(wget *)"
     ]
   },
   "disableAutoMode": "disable",
   "disableBypassPermissionsMode": "disable",
   "allowManagedPermissionRulesOnly": true,
-  "allowManagedHooksOnly": true,
   "env": {
     "CLAUDE_CODE_STOP_HOOK_BLOCK_CAP": "20"
   }
 }
 ```
 
+完整設定見 [managed-settings template](../setup/templates/managed-settings.json)。Machine-wide 層只保留共通 permission 底線；不設定 `allowManagedHooksOnly`，避免阻擋 project-local、path-aware hooks 與 `red-verifier`。
+
 **關鍵說明**：
 - `defaultMode: "plan"`：所有操作預設需要計畫確認
-- `deny: ["Edit(./spec/**)]"`：禁止 agent 修改 spec 檔案
-- `allowManagedHooksOnly: true`：hook 只能從此 managed 設定載入
+- configured protected spec roots 由 project `pre_impl_gate.py` 讀取 target policy，避免 machine policy 綁死 spec folder
+- `allowManagedPermissionRulesOnly`：共通 permissions 仍由管理員控制
 - `CLAUDE_CODE_STOP_HOOK_BLOCK_CAP: 20`：Stop hook 最多 block 20 次，防無限循環
 
 ---
@@ -51,25 +51,32 @@
 ### P1：目錄結構初始化
 
 ```bash
-# 專案規格目錄
-mkdir -p specs/{domain,features,contracts/{api,ui},quality,decisions,traceability}
+# Compatibility layout
+bash setup/init.sh <target-project-dir>
 
-# VDD 狀態目錄
-mkdir -p .vdd/red
-echo "INIT" > .vdd/phase
-
-# Hook scripts 目錄
-mkdir -p .claude/hooks
-
-# Subagent 目錄
-mkdir -p .claude/agents
+# Custom layout：第二參數提供 project-local policy
+bash setup/init.sh <target-project-dir> <path-policy-json>
 ```
+
+Policy 寫入 `<target>/.vdd/path-policy.json`。若未提供，init 安裝 `setup/templates/path-policy.json` 並建立既有 `specs/` layout；若提供 custom policy，init 不會合成 `src/`、`specs/` 或 `tests/`。
+
+| Policy key | Contract |
+|---|---|
+| `implementation_roots` | 受 SPEC/RED gate 管理的 implementation roots |
+| `feature_spec_templates` | 由 implementation context 解析 feature spec |
+| `protected_spec_roots` | 禁止 agent 直接修改的 canonical spec roots |
+| `red_evidence_template` | Red Evidence path template |
+| `test_file_patterns` | deterministic test weakening globs；defaults 保留 legacy `test`／`spec` matching semantics |
+| `test_roots` | GREEN pytest 與 RED test-path containment 使用的 test roots |
+| `spec_change_paths` | spec diff injection paths |
+
+Policy 是 partial override：省略的 key 使用 compatibility default。它只描述 repository path/layout，不接受 executable 或 shell command。格式或 path containment 錯誤必須 loud fail。
 
 ---
 
 ### P2：Hook Scripts 安裝
 
-將 `.claude/hooks/*.py` 複製到專案的 `.claude/hooks/` 目錄，並設置執行權限：
+`.claude/hooks/*.py` 是 versioned project runtime：
 
 ```bash
 cp <stdd-vdd-repo>/.claude/hooks/*.py .claude/hooks/
@@ -83,115 +90,46 @@ Hook 功能對照：
 | `pre_impl_gate.py` | PreToolUse Edit/Write | SPEC + RED Gate 檢查 |
 | `bash_guard.py` | PreToolUse Bash | 防止 Bash 繞過 gate |
 | `green_gate.py` | Stop | GREEN Gate，阻擋不完整結束 |
-| `test_weakening_guard.py` | PostToolUse Edit/Write | 偵測測試弱化 |
+| `test_weakening_guard.py` | PreToolUse Edit/Write | mutation 前偵測測試弱化／assert removal |
 | `inject_spec.py` | UserPromptSubmit | 注入 .vdd/phase 狀態 |
 | `reinject_rules.py` | SessionStart(compact) | Context 壓縮後重注入規則 |
+| `path_policy.py` | support module | 載入與驗證 project-local path contract |
 
 ---
 
-### P3：Hook 註冊（settings.json）
+### P3：Hook 註冊（project settings）
 
-`.claude/settings.json`：
-
-```json
-{
-  "hooks": {
-    "UserPromptSubmit": [
-      {
-        "hooks": [
-          {
-            "type": "command",
-            "command": "python3 .claude/hooks/inject_spec.py"
-          }
-        ]
-      }
-    ],
-    "PreToolUse": [
-      {
-        "matcher": "Edit|Write",
-        "hooks": [
-          {
-            "type": "command",
-            "command": "python3 .claude/hooks/pre_impl_gate.py"
-          }
-        ]
-      },
-      {
-        "matcher": "Bash",
-        "hooks": [
-          {
-            "type": "command",
-            "command": "python3 .claude/hooks/bash_guard.py"
-          }
-        ]
-      }
-    ],
-    "PostToolUse": [
-      {
-        "matcher": "Edit|Write",
-        "hooks": [
-          {
-            "type": "command",
-            "command": "python3 .claude/hooks/test_weakening_guard.py"
-          }
-        ]
-      }
-    ],
-    "Stop": [
-      {
-        "hooks": [
-          {
-            "type": "command",
-            "command": "python3 .claude/hooks/green_gate.py"
-          }
-        ]
-      }
-    ],
-    "SessionStart": [
-      {
-        "matcher": "compact",
-        "hooks": [
-          {
-            "type": "command",
-            "command": "python3 .claude/hooks/reinject_rules.py"
-          }
-        ]
-      }
-    ]
-  }
-}
-```
+`.claude/settings.json` 註冊 PreToolUse／Stop／UserPromptSubmit／SessionStart hooks。Launcher 使用 quoted `$CLAUDE_PROJECT_DIR`，不依賴 current working directory。
 
 ---
 
-### P4：Subagent 安裝（red-verifier）
+### P4：RED verifier
+
+主 agent 委派 `.claude/agents/red-verifier.md`，並提供 requirement、implementation、exact test 與 policy-resolved evidence path。Verifier 在目前 worktree 真實 collect/run，成功後寫 evidence 與 `RED_VERIFIED` phase；不再要求隔離 worktree，也不以 `Agent(*)` 阻擋。
+
+---
+
+### P5：Verification command 依賴
+
+此 reference runtime 固定使用 pytest 與 ruff；path policy 不接受 repository-defined commands。
 
 ```bash
-cp <stdd-vdd-repo>/.claude/agents/red-verifier.md .claude/agents/
-```
-
-**重要**：subagent 的 `hooks`/`mcpServers`/`permissionMode` 欄位在 plugin agent 的 frontmatter 中是**安全性被忽略**的。Gate hooks 必須在 top-level `settings.json` 中，不能只放在 subagent 定義中。
-
----
-
-### P5：Python 依賴安裝
-
-```bash
-pip install pytest pytest-cov ruff mutmut
+python3 -m pip install pytest pytest-cov ruff mutmut
 # 整合測試（若需要）
-pip install pytest-asyncio httpx
+python3 -m pip install pytest-asyncio httpx
 # Contract 測試（若需要）
-pip install pact-python
+python3 -m pip install pact-python
 ```
+
+安裝後執行 `python3 -I -m pytest --version` 與 `python3 -I -m ruff --version` 驗證 isolated module runtime。
 
 ---
 
 ### P6：Smoke Test（驗證 gate 有效）
 
 ```bash
-# 在 .vdd/phase = INIT 時，嘗試 Edit src/ 應被 block
-echo '{"tool_name":"Edit","tool_input":{"file_path":"src/test.py"}}' | \
-  python3 .claude/hooks/pre_impl_gate.py 2>&1; echo "exit: $?"
+# init.sh 會讀取 implementation_roots[0] 並執行同等 smoke test；也可直接：
+bash setup/init.sh . .vdd/path-policy.json
 ```
 
 預期結果：stderr 顯示 `BLOCKED [GATE:SPEC]` 或 `BLOCKED [GATE:RED]`，且 exit code = 2。
@@ -216,7 +154,7 @@ echo '{"tool_name":"Edit","tool_input":{"file_path":"src/test.py"}}' | \
 ```
 
 Oracle MCP server 提供：
-- 查詢 specs/ 目錄的工具
+- 查詢 configured spec paths 的工具
 - Red Evidence 驗證工具
 - Traceability matrix 查詢工具
 
@@ -258,20 +196,11 @@ if data.get("stop_hook_active"):
 
 ---
 
-## 狀態更新範例
+## 狀態更新規則
 
 `.vdd/phase` 是此 Claude Code 相容性實作的狀態提示；它不能單獨證明 profile-resolved `GATE:VDD`、`GATE:DEPLOY`、Evidence Envelope 或 Production Verification 已通過。以 target environment 的 Confirm Mode、policy 和可重跑 artifact 為準。
 
-```bash
-# agent 完成 RED 驗證後手動更新 phase
-echo "RED_VERIFIED" > .vdd/phase
-
-# agent 完成 GREEN 後
-echo "GREEN" > .vdd/phase
-
-# CI VDD 通過後
-echo "VDD_PASS" > .vdd/phase
-```
+`red-verifier` 負責產生 configured Red Evidence 與 `RED_VERIFIED` phase；Stop hook 只在 verification commands 通過後更新為 `GREEN`。其他 profile／VDD／deploy 狀態由對應外部治理系統管理。
 
 ---
 

@@ -14,8 +14,8 @@
 |------|------|
 | **STDD** | Specification & Test-Driven Development（≠ TDD，有 Spec 層） |
 | **VDD** | Verification & Validation-Driven Development（**≠ Value-Driven，≠ Vulnerability-Driven**）|
-| **Canonical Spec** | `specs/` 目錄下的唯一規格來源 |
-| **Red Evidence** | `.vdd/red/<req-id>.json`，測試在實作前失敗的機器可驗證紀錄 |
+| **Canonical Spec** | `.vdd/path-policy.json` 的 `protected_spec_roots` 所宣告之唯一規格來源；相容預設為 `spec/`、`specs/` |
+| **Red Evidence** | `red_evidence_template` 所宣告的機器可驗證 JSON；相容預設為 `.vdd/red/<module>.json` |
 | **Headroom** | Context 壓縮層（**≠ memory engine**） |
 | **GATE:ADMIT** | 上游探索閘門（07 的上游，獨立閘門）|
 
@@ -39,25 +39,25 @@ confirm_mode_checklist:
     verify: "回答：VDD 代表什麼？GATE:RED 強制等級是什麼？"
 
   - id: "CM-02"
-    check: "managed-settings.json 存在（macOS）"
-    command: "ls '/Library/Application Support/ClaudeCode/managed-settings.json'"
+    check: "managed settings 保留 permission 底線且未禁用 project hooks（macOS）"
+    command: "python3 -c \"import json; d=json.load(open('/Library/Application Support/ClaudeCode/managed-settings.json')); assert d.get('allowManagedPermissionRulesOnly') is True and 'allowManagedHooksOnly' not in d\""
 
   - id: "CM-03"
-    check: ".vdd/phase 存在"
-    command: "cat .vdd/phase"
+    check: ".vdd/path-policy.json 有效且 .vdd/phase 存在"
+    command: "python3 .claude/hooks/path_policy.py && cat .vdd/phase"
 
   - id: "CM-04"
-    check: "6 個 hook scripts 存在"
+    check: "6 個 hook entrypoints 與 path_policy.py 存在"
     command: "ls .claude/hooks/"
-    expected: "6 個 .py 檔案"
+    expected: "7 個 .py 檔案"
 
   - id: "CM-05"
-    check: ".claude/settings.json 有 hooks 定義"
-    command: "python3 -c \"import json; d=json.load(open('.claude/settings.json')); print(list(d.get('hooks',{}).keys()))\""
+    check: "project settings 有 PreToolUse／Stop／UserPromptSubmit hooks"
+    command: "python3 -c \"import json; h=json.load(open('.claude/settings.json'))['hooks']; assert all(e in h for e in ['PreToolUse','Stop','UserPromptSubmit'])\""
 
   - id: "CM-06"
     check: "red-verifier subagent 存在"
-    command: "ls .claude/agents/red-verifier.md"
+    command: "test -f .claude/agents/red-verifier.md"
 
   - id: "CM-07"
     check: "System／Change Profile、Evidence 與 Release contract 可載入"
@@ -78,19 +78,23 @@ confirm_mode_checklist:
 # 確認 managed-settings.json 存在
 ls "/Library/Application Support/ClaudeCode/managed-settings.json"
 
-# 若不存在，需管理員執行：
+# 若不存在，需由管理員安裝：
 sudo mkdir -p "/Library/Application Support/ClaudeCode"
 sudo cp setup/templates/managed-settings.json \
   "/Library/Application Support/ClaudeCode/managed-settings.json"
 ```
 
-### P1：目錄結構
+### P1：Path policy 與治理目錄
 
 ```bash
-mkdir -p specs/{domain,features,contracts/{api,ui},quality,decisions,traceability}
-mkdir -p .vdd/red
-[ -f .vdd/phase ] || echo "INIT" > .vdd/phase
+# Compatibility layout
+bash setup/init.sh <target-project-dir>
+
+# Custom layout
+bash setup/init.sh <target-project-dir> <path-policy-json>
 ```
+
+Path policy 是 project-local deterministic **path/layout** contract。Custom policy 可只覆寫需要改動的 key，其餘使用 compatibility defaults；test directories 使用 `test_roots`。Policy 不接受 executable/shell command，也不得靠 framework heuristic 猜測。
 
 若是從本 template 手動套用，還必須複製 agent 指令所引用的 authority artifacts：
 
@@ -110,34 +114,34 @@ cp <this-repo>/.claude/hooks/*.py .claude/hooks/
 # 若在本 repo 內執行，跳過 cp，hooks 已在正確位置
 ```
 
-### P3：Hook 註冊
+### P3：Project Hook 註冊
 
 ```bash
-# 確認 settings.json 存在
-[ -f .claude/settings.json ] || cp <this-repo>/.claude/settings.json .claude/settings.json
+# project settings 註冊 path-aware hooks
+python3 -c "import json; h=json.load(open('.claude/settings.json'))['hooks']; assert all(e in h for e in ['PreToolUse','Stop','UserPromptSubmit'])"
 ```
 
-### P4：Subagent
+### P4：RED verifier
 
 ```bash
-mkdir -p .claude/agents
-[ -f .claude/agents/red-verifier.md ] || \
-  cp <this-repo>/.claude/agents/red-verifier.md .claude/agents/
+test -f .claude/agents/red-verifier.md
 ```
 
-### P5：Python 依賴
+### P5：Verification command 依賴
 
 ```bash
-pip install pytest pytest-cov ruff mutmut
+# fixed managed RED/GREEN toolchain
+python3 -m pip install pytest pytest-cov ruff mutmut
 ```
+
+執行 `python3 -I -m pytest --version` 與 `python3 -I -m ruff --version` 取得可重跑 readiness 結果。
 
 ### P6：Smoke Test（驗證 gate 有效）
 
 ```bash
-# 在 .vdd/phase = INIT 時，嘗試 Edit src/ 應被 block
-# 正確結果：exit code 2，stderr 顯示 BLOCKED [GATE:SPEC]
-echo '{"tool_name":"Edit","tool_input":{"file_path":"src/test.py"}}' | \
-  python3 .claude/hooks/pre_impl_gate.py 2>&1; echo "exit: $?"
+# init.sh 讀取 implementation_roots[0] 並對 <root>/test.py 執行 smoke test
+bash setup/init.sh . .vdd/path-policy.json
+# 正確結果：P6 PASS；hook exit code 2 且 stderr 顯示 BLOCKED [GATE:SPEC]
 ```
 
 ---
@@ -160,8 +164,8 @@ echo '{"tool_name":"Edit","tool_input":{"file_path":"src/test.py"}}' | \
 以下情況下，**立即停止並回報**，不繼續執行：
 
 1. `.vdd/phase` 不在預期狀態（如 INIT 卻嘗試寫實作）
-2. `specs/features/<module>.feature` 不存在，卻被要求實作 `src/<module>.py`
-3. Red Evidence（`.vdd/red/<req-id>.json`）不存在，卻要求進入實作
+2. `feature_spec_templates` 解析後的 spec 不存在，卻被要求修改 configured implementation root
+3. `red_evidence_template` 解析後的 JSON 不存在，卻要求進入實作
 4. 請求弱化測試（pytest.skip / assert True / xfail）
 5. T3 需求沒有人工授權就嘗試 auto-dispatch
 
@@ -176,10 +180,10 @@ CONFIRM MODE RESULT:
   CM-00: PASS — governance manifest/gates/profiles 存在，authority state 已讀取
   CM-01: PASS — VDD = Verification & Validation-Driven Dev, GATE:RED = runtime 強制
   CM-02: PASS — managed-settings.json 存在
-  CM-03: PASS — .vdd/phase = RED_VERIFIED
-  CM-04: PASS — 6 個 hook scripts 存在
-  CM-05: PASS — hooks: PreToolUse, Stop, UserPromptSubmit, PostToolUse, SessionStart
-  CM-06: PASS — red-verifier.md 存在
+  CM-03: PASS — path policy JSON valid；.vdd/phase = RED_VERIFIED
+  CM-04: PASS — 6 個 hook entrypoints + path_policy.py 存在
+  CM-05: PASS — project hooks: PreToolUse, Stop, UserPromptSubmit, SessionStart
+  CM-06: PASS — red-verifier subagent 存在
   CM-07: PASS — profile、VDD 與 deploy contracts 可載入
 
 ENVIRONMENT STATUS: READY

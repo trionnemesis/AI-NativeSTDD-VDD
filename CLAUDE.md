@@ -25,8 +25,8 @@ Machine-readable shadow 位於 `governance/glossary.yaml`；以下只保留舊�
 |------|------|
 | **STDD** | Specification & Test-Driven Development：以 Canonical Spec + 先寫測試作為 hard constraint |
 | **VDD** | Verification & Validation-Driven Development（**≠ Value-Driven，≠ Vulnerability-Driven**）：Green 後的 profile-resolved quality gate；Production Telemetry 僅驗證 operational quality assumptions，不是 security/privacy/authorization/compliance 的唯一證據 |
-| **Canonical Spec** | `specs/` 下的單一規格來源，包含 Stable ID |
-| **Red Evidence** | `.vdd/red/<req-id>.json`，證明測試在實作前失敗 |
+| **Canonical Spec** | `.vdd/path-policy.json` 的 `protected_spec_roots` 所宣告之單一規格來源，包含 Stable ID；相容預設為 `spec/`、`specs/` |
+| **Red Evidence** | `red_evidence_template` 所宣告的 JSON evidence；相容預設為 `.vdd/red/<module>.json` |
 | **Delta Spec** | 變更套件，包含 intent.md、delta.yaml、impact.md、acceptance.feature |
 | **Headroom** | Context 壓縮層，token 效率中介層（≠ memory engine） |
 
@@ -42,18 +42,18 @@ GATE:SPEC → GATE:RED → GATE:GREEN → GATE:VDD → GATE:DEPLOY
 
 ### GATE:SPEC（runtime 強制）
 - **條件**：Change Intent、Delta Spec、Impact Analysis、Stable ID、System／Change Profile、適用 assertion 與 evidence plan 已解析
-- **強制**：已安裝 target 的 PreToolUse hook 可阻擋無 `.feature` 的 `src/` 寫入；其他 contract 是否 enforcement 以 Confirm Mode 與 target policy 為準
-- **禁止**：無 spec 寫任何 `src/` 下的實作檔
+- **強制**：已安裝 target 的 PreToolUse hook 依 `.vdd/path-policy.json` 阻擋 protected spec 寫入，以及缺少對應 feature spec 的 configured implementation-root 寫入；其他 contract 是否 enforcement 以 Confirm Mode 與 target policy 為準
+- **禁止**：無 spec 寫任何 configured implementation root 下的實作檔
 
 ### GATE:RED（runtime 強制）
 - **條件**：FEATURE／DEFECT 有 baseline failure；其他 Change Profile 有 policy-accepted alternative evidence
 - **強制**：PreToolUse hook
 - **禁止**：測試或替代 evidence 無失敗能力就開始實作；test actor 不可讀取新的 implementation solution
-- **必做**：委派 `red-verifier` subagent 執行，存 `.vdd/red/<req-id>.json`
+- **必做**：主 agent 提供 requirement／implementation／test mapping 與 policy-resolved evidence path，委派 `red-verifier` 真實 collect/run 後寫入 evidence 與 `.vdd/phase`
 
 ### GATE:GREEN（runtime 強制）
 - **條件**：profile-resolved tests、static analysis、lint/type/build、protected-test integrity 均通過；啟用 TIA 時保留 selection/fallback evidence
-- **強制**：已安裝 target 的 Stop hook 可阻擋 `pytest tests/` 或 `ruff check .` 失敗；其餘 suite 依 target profile/policy
+- **強制**：已安裝 target 的 Stop hook 對 configured `test_roots` 執行 pytest，再執行 `ruff check .`；path policy 不接受 repository-defined executable
 - **禁止**：弱化/跳過/刪除測試以繞過此閘門
 
 ### GATE:VDD（config/流程）
@@ -71,15 +71,15 @@ GATE:SPEC → GATE:RED → GATE:GREEN → GATE:VDD → GATE:DEPLOY
 
 以下行為在任何情況下都不允許：
 
-1. **無 spec 寫實作** → 先建 `specs/features/<module>.feature`
-2. **跳過 RED Gate** → 必須有 `.vdd/red/*.json` 作為 evidence
+1. **無 spec 寫實作** → 先依 `feature_spec_templates` 建立對應 spec
+2. **跳過 RED Gate** → 必須有 `red_evidence_template` 對應的 JSON evidence
 3. **弱化測試**：
    - `assert True`（無效斷言）
    - `pytest.skip` / `unittest.skip`（跳過測試）
    - `xfail`（預期失敗標記）
    - `pass # assert`（空斷言）
 4. **直接刪除測試** → 測試刪除需 spec 更新作為前提
-5. **用 Bash 繞過 hook**（`echo > src/`、`tee`、`sed -i`）
+5. **用 Bash 繞過 hook**（對 configured implementation roots 使用 redirect、`tee`、`sed -i` 等）
 6. **在 T3 需求下 auto-dispatch**
 
 ---
@@ -158,6 +158,7 @@ Context 被壓縮後，`SessionStart(compact)` hook 會自動重注入關鍵閘�
 ## 十一、相關文件
 
 - Authority state：`governance/manifest.yaml`
+- Target path policy：`.vdd/path-policy.json`（不存在時使用 compatibility defaults；格式錯誤時 loud fail）
 - Task-specific machine contracts：`governance/gates/`、`governance/profiles/`
 - Human reference：`docs/` 目錄
 - Agent 設定：`setup/AGENT_SETUP_PROTOCOL.md`

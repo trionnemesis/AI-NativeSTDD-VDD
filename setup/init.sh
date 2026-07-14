@@ -1,29 +1,94 @@
 #!/usr/bin/env bash
 # init.sh — STDD×VDD 環境一鍵初始化腳本
 # 執行後，當前目錄會有完整的 STDD×VDD 治理層結構
-# 使用方式：bash setup/init.sh [target-project-dir]
+# 使用方式：bash setup/init.sh [target-project-dir] [path-policy-json]
 set -e
 
 TARGET="${1:-.}"
+POLICY_SOURCE="${2:-}"
 SCRIPT_DIR="$(cd "$(dirname "$0")/.." && pwd)"
 mkdir -p "$TARGET"
-TARGET_DIR="$(cd "$TARGET" && pwd)"
+TARGET_DIR="$(cd "$TARGET" && pwd -P)"
 
 echo "=== STDD×VDD Init ==="
 echo "Target: $TARGET_DIR"
 echo "Template: $SCRIPT_DIR"
 echo ""
 
-# P1: 目錄結構
-echo "[P1] 建立目錄結構..."
-mkdir -p "$TARGET/specs/domain"
-mkdir -p "$TARGET/specs/features"
-mkdir -p "$TARGET/specs/contracts/api"
-mkdir -p "$TARGET/specs/contracts/ui"
-mkdir -p "$TARGET/specs/quality"
-mkdir -p "$TARGET/specs/decisions"
-mkdir -p "$TARGET/specs/traceability"
-mkdir -p "$TARGET/.vdd/red"
+# P1: Path policy + 目錄結構
+echo "[P1] 建立 path policy 與治理目錄..."
+if [ -L "$TARGET/.vdd" ] || [ -L "$TARGET/.claude" ] || \
+   [ -L "$TARGET/.claude/hooks" ]; then
+  echo "  ERROR: target control directories 不得為 symlink" >&2
+  exit 1
+fi
+mkdir -p "$TARGET/.vdd"
+
+POLICY_DEST="$TARGET_DIR/.vdd/path-policy.json"
+POLICY_TEMP="$TARGET_DIR/.vdd/.path-policy.$$.tmp"
+POLICY_CANDIDATE="$POLICY_DEST"
+POLICY_MESSAGE="Existing .vdd/path-policy.json preserved"
+
+if [ -L "$POLICY_DEST" ]; then
+  echo "  ERROR: $POLICY_DEST 不得為 symlink" >&2
+  exit 1
+fi
+
+if [ -n "$POLICY_SOURCE" ]; then
+  if [ ! -f "$POLICY_SOURCE" ]; then
+    echo "  ERROR: path policy 不存在: $POLICY_SOURCE" >&2
+    exit 1
+  fi
+  POLICY_SOURCE_DIR="$(cd "$(dirname "$POLICY_SOURCE")" && pwd -P)"
+  POLICY_SOURCE_PATH="$POLICY_SOURCE_DIR/$(basename "$POLICY_SOURCE")"
+  if [ "$POLICY_SOURCE_PATH" = "$POLICY_DEST" ]; then
+    POLICY_MESSAGE="Existing path policy validated in place"
+  else
+    cp "$POLICY_SOURCE_PATH" "$POLICY_TEMP"
+    POLICY_CANDIDATE="$POLICY_TEMP"
+    POLICY_MESSAGE="Copied custom path policy"
+  fi
+elif [ -f "$POLICY_DEST" ]; then
+  POLICY_MESSAGE="Existing .vdd/path-policy.json preserved"
+else
+  cp "$SCRIPT_DIR/setup/templates/path-policy.json" "$POLICY_TEMP"
+  POLICY_CANDIDATE="$POLICY_TEMP"
+  POLICY_MESSAGE="Installed compatibility path policy"
+fi
+
+if ! python3 -m json.tool "$POLICY_CANDIDATE" >/dev/null; then
+  rm -f "$POLICY_TEMP"
+  echo "  ERROR: .vdd/path-policy.json 不是有效 JSON" >&2
+  exit 1
+fi
+if ! (cd "$TARGET_DIR" && CLAUDE_PROJECT_DIR="$TARGET_DIR" \
+  python3 "$SCRIPT_DIR/.claude/hooks/path_policy.py" \
+  --policy "$POLICY_CANDIDATE" >/dev/null); then
+  rm -f "$POLICY_TEMP"
+  echo "  ERROR: .vdd/path-policy.json schema 驗證失敗" >&2
+  exit 1
+fi
+if [ "$POLICY_CANDIDATE" = "$POLICY_TEMP" ]; then
+  mv -f "$POLICY_TEMP" "$POLICY_DEST"
+fi
+echo "  $POLICY_MESSAGE"
+
+if cmp -s "$POLICY_DEST" "$SCRIPT_DIR/setup/templates/path-policy.json"; then
+  COMPATIBILITY_POLICY=1
+  mkdir -p "$TARGET/specs/domain"
+  mkdir -p "$TARGET/specs/features"
+  mkdir -p "$TARGET/specs/contracts/api"
+  mkdir -p "$TARGET/specs/contracts/ui"
+  mkdir -p "$TARGET/specs/quality"
+  mkdir -p "$TARGET/specs/decisions"
+  mkdir -p "$TARGET/specs/traceability"
+  mkdir -p "$TARGET/.vdd/red"
+  echo "  Compatibility layout created"
+else
+  COMPATIBILITY_POLICY=0
+  echo "  Custom layout preserved; implementation/spec/test directories are not synthesized"
+fi
+
 mkdir -p "$TARGET/.claude/hooks"
 mkdir -p "$TARGET/.claude/agents"
 mkdir -p "$TARGET/changes"
@@ -83,7 +148,7 @@ if [ "$TARGET_DIR" = "$SCRIPT_DIR" ]; then
 elif [ -d "$SCRIPT_DIR/.claude/hooks" ]; then
   cp "$SCRIPT_DIR/.claude/hooks/"*.py "$TARGET/.claude/hooks/"
   chmod +x "$TARGET/.claude/hooks/"*.py
-  echo "  Copied 6 hook scripts"
+  echo "  Copied 6 hook entrypoints + path_policy.py"
 else
   echo "  WARN: $SCRIPT_DIR/.claude/hooks 不存在，跳過"
 fi
@@ -101,7 +166,7 @@ elif [ -f "$TARGET/.claude/settings.json" ]; then
 fi
 echo "[P3] 完成"
 
-# P4: Subagent
+# P4: RED verifier subagent
 echo "[P4] 複製 red-verifier subagent..."
 if [ "$TARGET_DIR" = "$SCRIPT_DIR" ]; then
   echo "  Template repo 內執行，red-verifier.md 已在正確位置"
@@ -111,22 +176,25 @@ elif [ ! -f "$TARGET/.claude/agents/red-verifier.md" ] && \
   echo "  Copied red-verifier.md"
 elif [ -f "$TARGET/.claude/agents/red-verifier.md" ]; then
   echo "  red-verifier.md 已存在，跳過"
+else
+  echo "  ERROR: red-verifier.md missing" >&2
+  exit 1
 fi
 echo "[P4] 完成"
 
 # P5: Python 依賴
-echo "[P5] 安裝 Python 依賴..."
-if command -v pip3 &>/dev/null; then
-  pip3 install -q pytest pytest-cov ruff mutmut
-  echo "  Installed: pytest, pytest-cov, ruff, mutmut"
+echo "[P5] 準備 verification command 依賴..."
+if python3 -m pip --version >/dev/null 2>&1; then
+  python3 -m pip install -q 'pytest>=8.3,<10.0' pytest-cov 'ruff>=0.12,<1.0' mutmut
+  echo "  Installed verification tools: pytest pytest-cov ruff mutmut"
 else
-  echo "  WARN: pip3 不可用，請手動安裝: pip install pytest pytest-cov ruff mutmut"
+  echo "  WARN: python3 的 pip 不可用，請以同一 interpreter 手動安裝 verification tools"
 fi
 echo "[P5] 完成"
 
 # P0 提示（需管理員）
 echo ""
-echo "[P0] managed-settings.json（需管理員，手動執行）:"
+echo "[P0] managed-settings.json（需管理員）:"
 MANAGED_PATH="/Library/Application Support/ClaudeCode/managed-settings.json"
 if [ -f "$MANAGED_PATH" ]; then
   echo "  PASS: $MANAGED_PATH 已存在"
@@ -141,10 +209,17 @@ fi
 echo ""
 echo "[P6] Smoke test..."
 if [ -f "$TARGET/.claude/hooks/pre_impl_gate.py" ]; then
-  RESULT=$(echo '{"tool_name":"Edit","tool_input":{"file_path":"src/test.py"}}' | \
-    python3 "$TARGET/.claude/hooks/pre_impl_gate.py" 2>&1; echo "EXIT:$?")
-  if echo "$RESULT" | grep -q "EXIT:2"; then
-    echo "  PASS: pre_impl_gate.py 正確 block src/ 寫入"
+  SMOKE_ROOT=$(python3 -c \
+    'import json,sys; data=json.load(open(sys.argv[1])); print(data.get("implementation_roots", ["src"])[0])' \
+    "$TARGET/.vdd/path-policy.json")
+  SMOKE_PAYLOAD=$(python3 -c \
+    'import json,sys; print(json.dumps({"tool_name":"Edit","tool_input":{"file_path":sys.argv[1] + "/test.py"}}))' \
+    "$SMOKE_ROOT")
+  RESULT=$(cd "$TARGET" && printf '%s\n' "$SMOKE_PAYLOAD" | \
+    CLAUDE_PROJECT_DIR="$TARGET_DIR" \
+    python3 .claude/hooks/pre_impl_gate.py 2>&1; echo "EXIT:$?")
+  if echo "$RESULT" | grep -q "EXIT:2" && echo "$RESULT" | grep -q "BLOCKED \[GATE:SPEC\]"; then
+    echo "  PASS: pre_impl_gate.py 正確 block $SMOKE_ROOT/ 寫入"
   else
     echo "  WARN: Smoke test 未如預期，請手動確認"
   fi

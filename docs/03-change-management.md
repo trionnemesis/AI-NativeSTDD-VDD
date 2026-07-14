@@ -196,7 +196,7 @@ EVID:* Envelope index 寫入 traceability
 
 ## 不允許的變更模式
 
-1. **直接修改 `specs/` 下的檔案而不建立 CR**
+1. **直接修改 configured protected spec roots 下的檔案而不建立 CR**（compatibility default：`spec/`、`specs/`）
 2. **backward-incompatible 變更沒有 Delta Spec**
 3. **刪除 Stable ID**（可 deprecate，不可刪除）
 4. **T3 變更在沒有人工審核下 auto-dispatch**

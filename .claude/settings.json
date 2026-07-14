@@ -5,7 +5,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "python3 .claude/hooks/inject_spec.py"
+            "command": "python3 \"$CLAUDE_PROJECT_DIR/.claude/hooks/inject_spec.py\""
           }
         ]
       }
@@ -16,7 +16,11 @@
         "hooks": [
           {
             "type": "command",
-            "command": "python3 .claude/hooks/pre_impl_gate.py"
+            "command": "python3 \"$CLAUDE_PROJECT_DIR/.claude/hooks/pre_impl_gate.py\""
+          },
+          {
+            "type": "command",
+            "command": "python3 \"$CLAUDE_PROJECT_DIR/.claude/hooks/test_weakening_guard.py\""
           }
         ]
       },
@@ -25,18 +29,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "python3 .claude/hooks/bash_guard.py"
-          }
-        ]
-      }
-    ],
-    "PostToolUse": [
-      {
-        "matcher": "Edit|Write",
-        "hooks": [
-          {
-            "type": "command",
-            "command": "python3 .claude/hooks/test_weakening_guard.py"
+            "command": "python3 \"$CLAUDE_PROJECT_DIR/.claude/hooks/bash_guard.py\""
           }
         ]
       }
@@ -46,7 +39,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "python3 .claude/hooks/green_gate.py"
+            "command": "python3 \"$CLAUDE_PROJECT_DIR/.claude/hooks/green_gate.py\""
           }
         ]
       }
@@ -57,7 +50,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "python3 .claude/hooks/reinject_rules.py"
+            "command": "python3 \"$CLAUDE_PROJECT_DIR/.claude/hooks/reinject_rules.py\""
           }
         ]
       }

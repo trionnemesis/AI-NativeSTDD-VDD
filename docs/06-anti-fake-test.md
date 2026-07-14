@@ -23,7 +23,9 @@ AI agent 在 TDD 環境中的常見「偽造」行為：
 
 Red Evidence 強制要求：**在任何實作開始前，測試必須真實失敗並留下機器可驗證的紀錄。**
 
-`.vdd/red/<req-id>.json` 結構：
+Red Evidence 的實際位置由 `.vdd/path-policy.json` 的
+`red_evidence_template` 決定；相容預設為 `.vdd/red/<module>.json`。以下內容是
+evidence schema 範例，不要求 target 採用特定目錄：
 
 ```json
 {
@@ -33,20 +35,20 @@ Red Evidence 強制要求：**在任何實作開始前，測試必須真實失�
   "failure_message": "FAILED tests/test_user_login.py::test_login_with_valid_credentials\nE   ImportError: cannot import name 'login' from 'src.auth'",
   "failure_location": "tests/test_user_login.py:23",
   "execution_timestamp": "2026-06-26T09:15:00Z",
-  "pytest_output": "==================== 1 failed in 0.12s ====================="
+  "failure_category": "MISSING_IMPLEMENTATION"
 }
 ```
 
 **驗證規則**：
-- `failure_message` 不得為空
-- `baseline_commit_sha` 必須是實作前的 commit
-- `execution_timestamp` 必須早於任何 `src/` 變更
+- evidence root 必須是 JSON object，required fields 必須是非空字串
+- `red-verifier` 必須記錄 `git rev-parse HEAD` 與真實 pytest failure
+- 環境錯誤不算 RED
 
 ---
 
 ## 防偽策略 2：Test Weakening Guard（hook）
 
-`test_weakening_guard.py` 在每次測試檔案修改後偵測弱化 pattern：
+`test_weakening_guard.py` 在每次測試檔案修改前偵測弱化 pattern：
 
 ```python
 weakening_patterns = [
@@ -58,8 +60,7 @@ weakening_patterns = [
 ]
 ```
 
-當前設定：發出 WARNING（不 block）。  
-升級到 block：將 `sys.exit(0)` 改為 `sys.exit(2)`。
+當前設定：命中明確弱化 pattern 時以 exit 2 block。
 
 ---
 
@@ -123,17 +124,17 @@ Traceability matrix 會驗證：每個 REQ 至少有一個對應測試。
 
 ```
 測試寫入時:
-  test_weakening_guard.py (PostToolUse) → 偵測靜態 pattern
+  test_weakening_guard.py (PreToolUse) → mutation 前偵測靜態 pattern／assert removal
 
 RED Gate 前:
-  red-verifier subagent → 執行真實 pytest，取得失敗輸出
+  red-verifier → 依 configured paths 執行 pytest collect/run，產出 evidence/phase
 
 VDD 階段:
-  mutmut → 偵測邏輯上無效的測試
+  target mutation tool（compatibility default：mutmut）→ 偵測邏輯上無效的測試
 
 CI 階段:
-  pytest-cov → 確保覆蓋率
-  pact-verifier → 確保 contract 測試真實
+  target coverage tool（例如 pytest-cov）→ 確保覆蓋率
+  target contract verifier（例如 pact-verifier）→ 確保 contract 測試真實
 ```
 
 ---

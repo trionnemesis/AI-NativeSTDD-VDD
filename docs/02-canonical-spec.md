@@ -7,13 +7,15 @@
 ## Canonical Spec 是什麼？
 
 Canonical Spec 是 STDD×VDD 中**唯一的規格來源**（Single Source of Truth）。  
-每個需求、功能、API contract、UI 狀態都必須在 `specs/` 目錄下有對應的規格文件。
+每個需求、功能、API contract、UI 狀態都必須在 `.vdd/path-policy.json` 的 `protected_spec_roots` 所宣告之範圍內有對應規格文件。
 
-**核心規則**：`specs/` 目錄下的任何檔案，AI agent 不得修改（hook 強制）。
+**核心規則**：configured protected spec roots 下的任何檔案，AI agent 不得直接修改（hook 強制）。`specs/` 是 compatibility default，不是強制 repository layout。
 
 ---
 
 ## 目錄結構
+
+下列結構是 default template；既有專案可保留自己的規格根目錄，並以 `feature_spec_templates`、`protected_spec_roots`、`spec_change_paths` 明確映射。
 
 ```
 specs/

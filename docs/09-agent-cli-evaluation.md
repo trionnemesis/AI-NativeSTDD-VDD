@@ -121,7 +121,7 @@ PostToolUse Hook
 3. `~/.claude/settings.json`（user-level）
 4. CLI flags
 
-**`allowManagedHooksOnly: true` 確保 hook 只從 managed 設定載入**，防止 agent 自行修改 hooks。
+本 reference implementation 不啟用 `allowManagedHooksOnly`：machine-wide settings 保留 permission 底線，path-aware runtime hooks 由 versioned `.claude/settings.json` 註冊。這避免組織層設定綁死 target 的 repository layout。
 
 ---
 

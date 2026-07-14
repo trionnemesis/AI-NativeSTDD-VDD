@@ -38,13 +38,16 @@ Claude Code 的 context compaction 機制：
 ```python
 #!/usr/bin/env python3
 # Why: context compaction 後 CLAUDE.md 的 path-scoped rules 不自動重注入。
-import sys, pathlib
+import sys
 
-gate_summary = """
+from path_policy import load_policy
+
+policy = load_policy()
+gate_summary = f"""
 [STDD×VDD Gate Rules — reinject after compaction]
-1. GATE:SPEC: 無 spec 不准寫實作（.vdd/phase 必須在 RED_VERIFIED 或 GREEN）
-2. GATE:RED:  測試必須先失敗才能開始實作（存 .vdd/red/*.json）
-3. GATE:GREEN: 所有測試必須通過才能結束（Stop hook 強制）
+1. GATE:SPEC: 無 spec 不准寫 configured roots: {policy['implementation_roots']}
+2. GATE:RED:  測試必須先失敗；evidence: {policy['red_evidence_template']}
+3. GATE:GREEN: configured `test_roots` 的 pytest 與 managed ruff check 全數通過才能結束
 4. 實作 Agent 禁止弱化/刪除/skip 測試
 5. VDD ≠ Value-Driven（純品質驗證層）
 """
@@ -62,15 +65,18 @@ SessionStart(compact) 是 Claude Code 在完成 context compaction 後觸發的 
 `inject_spec.py` 在每次使用者輸入時執行，注入當前狀態：
 
 ```python
+from path_policy import load_policy
+
 # 注入當前 .vdd/phase 狀態
 phase_file = pathlib.Path(".vdd/phase")
 if phase_file.exists():
     phase = phase_file.read_text().strip()
     output_lines.append(f"[STDD×VDD] Current gate phase: {phase}")
 
-# 注入最近 spec 變更摘要
+# 注入 configured spec paths 的最近變更摘要
+policy = load_policy()
 result = subprocess.run(
-    ["git", "diff", "--name-only", "--", "spec/", "specs/"],
+    ["git", "diff", "--name-only", "--", *policy["spec_change_paths"]],
     ...
 )
 ```
@@ -116,7 +122,7 @@ GATE:SPEC 和 GATE:RED 的強制不依賴 agent 記住規則，而是依賴 hook
 當 session 接近 context 上限時:
 1. 完成當前 GATE 再結束（不要在 RED_VERIFIED 和 GREEN 中間結束）
 2. 確認 .vdd/phase 已正確更新（狀態不在 context 中，在檔案中）
-3. Red Evidence 已存入 .vdd/red/（不在 context 中，在檔案中）
+3. Red Evidence 已存入 `red_evidence_template` 解析後的位置（不在 context 中，在檔案中）
 4. 下個 session 開始前確認 .vdd/phase 狀態
 ```
 

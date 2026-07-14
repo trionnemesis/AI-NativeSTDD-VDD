@@ -37,20 +37,20 @@ ls "/Library/Application Support/ClaudeCode/managed-settings.json"
 # 確認內容正確
 cat "/Library/Application Support/ClaudeCode/managed-settings.json" | \
   python3 -c "import json,sys; d=json.load(sys.stdin); \
-  assert d.get('allowManagedHooksOnly') == True, 'allowManagedHooksOnly missing'; \
+  assert d.get('allowManagedPermissionRulesOnly') == True, 'managed permission rules missing'; \
+  assert 'allowManagedHooksOnly' not in d, 'project hooks are disabled'; \
   assert d.get('permissions',{}).get('defaultMode') == 'plan', 'defaultMode != plan'; \
   print('P0: OK')"
 ```
 
 預期輸出：`P0: OK`
 
-### P1：目錄結構驗證
+### P1：Path policy 與治理目錄驗證
 
 ```bash
-# 必要目錄
-for dir in specs/domain specs/features specs/contracts/api specs/contracts/ui \
-           specs/quality specs/decisions specs/traceability \
-           .vdd/red .claude/hooks .claude/agents; do
+# 完整 policy schema/path 驗證；不能只跑 json.tool
+python3 .claude/hooks/path_policy.py
+for dir in .vdd .claude/hooks; do
   [ -d "$dir" ] && echo "OK: $dir" || echo "MISSING: $dir"
 done
 
@@ -63,7 +63,7 @@ cat .vdd/phase
 ```bash
 # 所有 hook 檔案存在
 for hook in pre_impl_gate bash_guard green_gate test_weakening_guard \
-            inject_spec reinject_rules; do
+            inject_spec reinject_rules path_policy; do
   [ -f ".claude/hooks/${hook}.py" ] && echo "OK: $hook" || echo "MISSING: $hook"
 done
 
@@ -74,37 +74,26 @@ python3 -m py_compile .claude/hooks/pre_impl_gate.py && echo "syntax: OK"
 ### P3：Hook 註冊驗證
 
 ```bash
-# settings.json 存在且有 hooks 定義
+# Runtime hooks 由 project settings 註冊。
 python3 -c "
 import json
-d = json.load(open('.claude/settings.json'))
-assert 'hooks' in d
+settings = json.load(open('.claude/settings.json'))
 for event in ['PreToolUse', 'Stop', 'UserPromptSubmit']:
-    assert event in d['hooks'], f'{event} missing'
+    assert event in settings['hooks'], f'{event} missing'
 print('P3: OK')
 "
 ```
 
-### P4：Subagent 驗證
+### P4：RED verifier 驗證
 
 ```bash
-# red-verifier 存在
-[ -f ".claude/agents/red-verifier.md" ] && echo "P4: OK" || echo "P4: MISSING"
-
-# 確認 frontmatter 正確
-python3 -c "
-content = open('.claude/agents/red-verifier.md').read()
-assert 'disallowedTools:' in content
-assert 'Write' in content
-assert 'Edit' in content
-print('P4 subagent: OK')
-"
+test -f .claude/agents/red-verifier.md
 ```
 
-### P5：Python 環境驗證
+### P5：GREEN command 環境驗證
 
 ```bash
-# 必要套件
+# RED/GREEN runtime 的固定工具
 for pkg in pytest ruff mutmut; do
   python3 -c "import $pkg" 2>/dev/null && echo "OK: $pkg" || echo "MISSING: $pkg"
 done
@@ -116,19 +105,10 @@ python3 -c "import pytest_cov" 2>/dev/null && echo "OK: pytest-cov" || echo "MIS
 ### P6：First-Run 功能驗證（Smoke Test）
 
 ```bash
-# 模擬 GATE:SPEC 觸發（應被 block）
-# 在 .vdd/phase = INIT 的狀態下，嘗試寫 src/ 應被 hook 阻擋
-
-# 建立測試環境
-mkdir -p /tmp/stdd-test/src /tmp/stdd-test/.vdd
-echo "INIT" > /tmp/stdd-test/.vdd/phase
-cp .claude/hooks/pre_impl_gate.py /tmp/stdd-test/
-
-# 模擬 hook 輸入（Edit tool 到 src/test.py）
-cd /tmp/stdd-test
-echo '{"tool_name":"Edit","tool_input":{"file_path":"src/test.py"}}' | \
-  python3 pre_impl_gate.py 2>&1; echo "exit: $?"
-# 預期輸出: BLOCKED: ... 且 exit code = 2
+# init.sh 會以 implementation_roots[0]/test.py 模擬 GATE:SPEC 觸發。
+# custom layout example：
+bash setup/init.sh /tmp/stdd-test ./my-path-policy.json
+# 預期 P6: PASS，且輸出顯示實際 configured root
 ```
 
 ---
@@ -140,38 +120,38 @@ Agent 在 Confirm Mode 中讀取此清單：
 ```yaml
 confirm_mode:
   - id: P0
-    check: "managed-settings.json 存在且 allowManagedHooksOnly = true"
-    command: "cat '/Library/Application Support/ClaudeCode/managed-settings.json'"
-    pass_condition: "allowManagedHooksOnly == true"
+    check: "managed settings 保留 permission 底線且未禁用 project hooks"
+    command: "python3 -c \"import json; d=json.load(open('/Library/Application Support/ClaudeCode/managed-settings.json')); assert d.get('allowManagedPermissionRulesOnly') is True and 'allowManagedHooksOnly' not in d\""
+    pass_condition: "machine permissions 存在，project hooks 可執行"
 
   - id: P1
-    check: "specs/ 和 .vdd/ 目錄結構完整"
-    command: "ls specs/ .vdd/"
-    pass_condition: "所有必要目錄存在"
+    check: ".vdd/path-policy.json 有效，治理目錄完整"
+    command: "python3 .claude/hooks/path_policy.py && ls .vdd/ .claude/hooks/"
+    pass_condition: "policy schema/path contract 有效且必要治理目錄存在"
 
   - id: P2
-    check: "6 個 hook scripts 存在於 .claude/hooks/"
+    check: "6 個 hook entrypoints 與 path_policy.py 存在於 .claude/hooks/"
     command: "ls .claude/hooks/"
-    pass_condition: "6 個 .py 檔案存在"
+    pass_condition: "7 個 .py 檔案存在"
 
   - id: P3
-    check: ".claude/settings.json 有 PreToolUse + Stop 註冊"
-    command: "python3 -c \"import json; print(json.load(open('.claude/settings.json'))['hooks'].keys())\""
-    pass_condition: "包含 PreToolUse 和 Stop"
+    check: "project settings 註冊 runtime hooks"
+    command: "python3 -c \"import json; h=json.load(open('.claude/settings.json'))['hooks']; assert all(e in h for e in ['PreToolUse','Stop','UserPromptSubmit']); print('P3: OK')\""
+    pass_condition: "project hooks 包含 PreToolUse、Stop、UserPromptSubmit"
 
   - id: P4
-    check: "red-verifier.md 存在於 .claude/agents/"
-    command: "ls .claude/agents/"
-    pass_condition: "red-verifier.md 存在"
+    check: "red-verifier subagent 存在"
+    command: "test -f .claude/agents/red-verifier.md"
+    pass_condition: "RED verifier 可委派"
 
   - id: P5
-    check: "pytest, ruff, mutmut 已安裝"
-    command: "python3 -m pytest --version && ruff --version && mutmut --version"
-    pass_condition: "三個命令都成功"
+    check: "fixed RED/GREEN toolchain 可用"
+    command: "python3 -I -m pytest --version && python3 -I -m ruff --version"
+    pass_condition: "pytest 與 ruff 可執行"
 
   - id: P6
-    check: "pre_impl_gate.py smoke test：INIT phase 應 block src/ 寫入"
-    command: "見 P6 說明"
+    check: "pre_impl_gate.py smoke test：INIT phase 應 block configured implementation root 寫入"
+    command: "bash setup/init.sh /tmp/stdd-readiness-smoke"
     pass_condition: "exit code = 2"
 ```
 
@@ -181,12 +161,12 @@ confirm_mode:
 
 | 失敗項目 | 嚴重性 | 處理方式 |
 |---------|--------|---------|
-| P0 失敗 | **Critical** | 停止，人工安裝 managed-settings.json |
-| P1 目錄缺失 | High | 自動建立目錄 |
+| P0 失敗 | **Critical** | 停止，人工安裝 managed settings |
+| P1 policy／治理目錄缺失 | High | 以 init.sh 安裝 default 或指定 custom policy |
 | P2 hook 缺失 | **Critical** | 停止，從模板複製 |
-| P3 settings 缺失 | **Critical** | 停止，從模板複製 |
-| P4 subagent 缺失 | Medium | 自動複製，但 RED Gate 降級到 manual |
-| P5 套件缺失 | High | 自動執行 pip install |
+| P3 project hook 缺失 | **Critical** | 停止，重裝 project settings/hooks |
+| P4 RED verifier 缺失 | **Critical** | 停止，從 template 複製 subagent |
+| P5 command 缺失 | High | 安裝固定 pytest/ruff verification toolchain |
 | P6 smoke test 失敗 | **Critical** | 停止，hook 腳本可能損壞 |
 
 ---
@@ -194,25 +174,10 @@ confirm_mode:
 ## 自動修復腳本
 
 ```bash
-# scripts/repair.sh — 嘗試自動修復 P1/P4/P5
+# 以 init.sh 修復治理檔案；既有 custom layout 不會被覆寫
 #!/bin/bash
 set -e
-
-# P1: 建目錄
-mkdir -p specs/{domain,features,contracts/{api,ui},quality,decisions,traceability}
-mkdir -p .vdd/red
-[ -f .vdd/phase ] || echo "INIT" > .vdd/phase
-
-# P2: 若有模板，複製 hooks
-if [ -d "../AI-NativeSTDD-VDD/.claude/hooks" ]; then
-  mkdir -p .claude/hooks
-  cp ../AI-NativeSTDD-VDD/.claude/hooks/*.py .claude/hooks/
-  echo "P2: hooks copied"
-fi
-
-# P5: 安裝套件
-pip install -q pytest pytest-cov ruff mutmut
-echo "P5: packages installed"
+bash ../AI-NativeSTDD-VDD/setup/init.sh . .vdd/path-policy.json
 ```
 
 ---

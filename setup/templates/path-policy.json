@@ -1,0 +1,12 @@
+{
+  "implementation_roots": ["src"],
+  "feature_spec_templates": [
+    "specs/features/{module}.feature",
+    "spec/features/{module}.feature"
+  ],
+  "protected_spec_roots": ["spec", "specs"],
+  "red_evidence_template": ".vdd/red/{module}.json",
+  "test_file_patterns": ["*test*", "*spec*"],
+  "test_roots": ["tests"],
+  "spec_change_paths": ["spec", "specs"]
+}

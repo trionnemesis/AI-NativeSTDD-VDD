@@ -1,33 +1,49 @@
 #!/usr/bin/env python3
-# Why: 防止 agent 用 Bash 繞過 PreToolUse Edit/Write 的 hook 限制。
-# 偵測 Bash 命令中直接寫入 src/ 的 pattern。
-import json, sys, re
+# Why: prevent common Bash writes from bypassing configured SPEC/RED paths.
+import json
+import re
+import sys
+
+from path_policy import PolicyError, load_policy, project_root
+
 
 data = json.load(sys.stdin)
 command = data.get("tool_input", {}).get("command", "")
 
-# 偵測 Bash 寫入 src/ 的常見模式
-bypass_patterns = [
-    (r">\s*src/", "重導向寫入 src/"),
-    (r"tee\s+src/", "tee 寫入 src/"),
-    (r"sed\s+-i.*src/", "sed -i 修改 src/"),
-    (r"cat\s+>.*src/", "cat 寫入 src/"),
-    (r"echo\s+.*>\s*src/", "echo 寫入 src/"),
-    (r"cp\s+.*\s+src/", "cp 到 src/"),
-    (r"mv\s+.*\s+src/", "mv 到 src/"),
-]
+try:
+    policy = load_policy()
+    root = project_root()
+except PolicyError as exc:
+    print(f"BLOCKED [PATH POLICY]: {exc}", file=sys.stderr)
+    sys.exit(2)
 
-violations = []
-for pattern, label in bypass_patterns:
-    if re.search(pattern, command):
-        violations.append(label)
+patterns = []
+governed_roots = dict.fromkeys(
+    [*policy["implementation_roots"], *policy["protected_spec_roots"]]
+)
+for governed_root in governed_roots:
+    relative = re.escape(governed_root)
+    absolute = re.escape((root / governed_root).as_posix())
+    target = rf"[\"']?(?:(?:\./)?{relative}|{absolute})/"
+    patterns.extend(
+        [
+            (rf">\s*{target}", f"重導向寫入 {governed_root}/"),
+            (rf"\btee\s+{target}", f"tee 寫入 {governed_root}/"),
+            (rf"\bsed\s+-i.*{target}", f"sed -i 修改 {governed_root}/"),
+            (rf"\bcat\s+>.*{target}", f"cat 寫入 {governed_root}/"),
+            (rf"\becho\s+.*>\s*{target}", f"echo 寫入 {governed_root}/"),
+            (rf"\bcp\s+.*\s+{target}", f"cp 到 {governed_root}/"),
+            (rf"\bmv\s+.*\s+{target}", f"mv 到 {governed_root}/"),
+        ]
+    )
 
+violations = [label for pattern, label in patterns if re.search(pattern, command)]
 if violations:
     print(
-        f"BLOCKED [GATE:RED/BASH]: 偵測到透過 Bash 繞過 gate 的嘗試。\n"
+        "BLOCKED [GATE:SPEC/RED/BASH]: 偵測到透過 Bash 繞過 gate 的嘗試。\n"
         f"  Violations: {', '.join(violations)}\n"
-        f"  請使用 Edit 或 Write tool，讓 SPEC/RED hook 正確觸發。",
-        file=sys.stderr
+        "  請使用 Edit 或 Write tool，讓 configured hook 正確觸發。",
+        file=sys.stderr,
     )
     sys.exit(2)
 
