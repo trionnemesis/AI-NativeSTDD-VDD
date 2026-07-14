@@ -1,0 +1,81 @@
+schema_version: "1.0.0"
+adapter_id: "ADAPTER:CODEX-HERMES"
+status: "NON_AUTHORITATIVE_OPT_IN"
+runtime:
+  name: "Codex"
+  independent_context_command: "codex exec"
+  independent_context_required_for: [review, verifier]
+
+authority:
+  manifest: "governance/manifest.yaml"
+  required_current: "NOTION_CANONICAL"
+  required_repository_state: "SHADOW_NON_AUTHORITATIVE"
+  forbidden_actions:
+    - "promote repository shadow to canonical"
+    - "reorder or add canonical pipeline gates"
+    - "claim target hooks are installed without live verification"
+
+canonical_pipeline:
+  - "GATE:SPEC"
+  - "GATE:RED"
+  - "GATE:GREEN"
+  - "GATE:VDD"
+  - "GATE:DEPLOY"
+
+lanes:
+  L1-bugfix:
+    purpose: "修正已觀察到的錯誤或 crash"
+    change_profile: "DEFECT"
+    delivery_gates: ["GATE:SPEC", "GATE:RED", "GATE:GREEN", "GATE:VDD"]
+    required_artifacts: ["reproduction test", "Red Evidence", "verification result"]
+    exit_criteria: ["red reproduction exists", "tests and required checks pass", "remaining risk is reported"]
+  L2-feature:
+    purpose: "新增能力或整合外部系統"
+    change_profile: "FEATURE"
+    delivery_gates: ["GATE:SPEC", "GATE:RED", "GATE:GREEN", "GATE:VDD", "GATE:DEPLOY"]
+    required_artifacts: [".plans/<feature>.md", "Delta Spec", "Red Evidence", "verification result"]
+    exit_criteria: ["plan files match the diff", "phase tests pass", "rollout order is executable"]
+  L3-research-decision:
+    purpose: "比較方案或決定是否採用某能力"
+    change_profile: null
+    delivery_gates: []
+    required_artifacts: ["research notes", "independent verifier report", "ADR when a decision is made"]
+    exit_criteria: ["evidence is independently checked", "steelman and reversal condition are recorded"]
+  L4-incident-RCA:
+    purpose: "分析環境或 production incident 的根因"
+    change_profile: null
+    delivery_gates: []
+    required_artifacts: ["RCA document", "timeline", "prevention guard"]
+    exit_criteria: ["root-cause chain is evidence-backed", "prevention guard is present", "residual risk is reported"]
+  L5-long-task-overlay:
+    purpose: "跨 context 或超過長任務門檻時的外部狀態 overlay"
+    overlay_only: true
+    delivery_gates: []
+    required_artifacts: ["TASK-STATE.md"]
+    required_fields: ["budget", "heartbeat", "stop_condition", "next_step"]
+
+workflow:
+  - name: "rehydrate"
+    codex_action: "read current git status and task state before unrelated history"
+  - name: "route"
+    codex_action: "select exactly one L1-L4 lane, then add L5 only when threshold is met"
+  - name: "plan"
+    codex_action: "create the lane-required plan or evidence artifact"
+  - name: "work"
+    codex_action: "make the smallest scoped change"
+  - name: "verify"
+    codex_action: "run the phase-specific tests and deterministic checks"
+  - name: "gate"
+    codex_action: "check lane exit criteria and cross-cutting safety boundaries"
+  - name: "handoff"
+    codex_action: "report changed files, evidence, and remaining risks"
+
+cross_cutting:
+  independent_review:
+    trigger: "diff >150 lines or change spans 3 or more files"
+    command: "codex exec"
+    reviewers: 4
+    verdict_rule: "critical findings fail; major findings require fix or explicit rationale"
+  security:
+    forbid_secrets_in: ["adapter config", "logs", "plans", "chat output"]
+    require_path_validation_for: ["filesystem access", "shell commands"]

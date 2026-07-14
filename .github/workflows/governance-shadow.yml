@@ -7,11 +7,21 @@ on:
       - "generated/notion-canonical-view.md"
       - "scripts/governance.py"
       - "tests/test_governance.py"
+      - "integrations/codex/**"
+      - "scripts/codex_adapter.py"
+      - "tests/test_codex_adapter.py"
+      - "docs/25-codex-adapter.md"
+      - "README.md"
       - "requirements-governance.txt"
       - ".claude/hooks/**"
       - ".claude/settings.json"
       - "setup/**"
       - "tests/test_hooks.py"
+      - "integrations/codex/**"
+      - "scripts/codex_adapter.py"
+      - "tests/test_codex_adapter.py"
+      - "docs/25-codex-adapter.md"
+      - "README.md"
       - ".github/workflows/governance-shadow.yml"
   push:
     branches: [main]
@@ -42,4 +52,5 @@ jobs:
       - run: python -m pip install -r requirements-governance.txt
       - run: python scripts/governance.py validate
       - run: python scripts/governance.py render --check
+      - run: python scripts/codex_adapter.py validate
       - run: python -m unittest discover -s tests -v

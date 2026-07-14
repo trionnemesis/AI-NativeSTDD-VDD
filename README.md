@@ -159,8 +159,16 @@ Confirm Mode 會先檢查 manifest、gate/profile contracts，再檢查 managed 
 | [`docs/`](docs/00-canonical-glossary.md) | 本機 human reference（00–15、18–24、26）；在 shadow 模式下不是 Notion 的替代 authority。 |
 | [`.claude/`](.claude/settings.json) | hooks、settings template 與 `red-verifier` subagent。 |
 | [`setup/`](setup/AGENT_SETUP_PROTOCOL.md) | Confirm／Configure Mode 與安裝模板。 |
+| [`integrations/codex/adapter.yaml`](integrations/codex/adapter.yaml) | Opt-in Codex／Hermes lane、Gate、evidence 與 independent-review mapping。 |
 | [`scripts/governance.py`](scripts/governance.py) | shadow validate、render 與 digest 工具。 |
+| [`scripts/codex_adapter.py`](scripts/codex_adapter.py) | Codex adapter 的 deterministic validation 與 mapping render。 |
 | [`tests/`](tests/test_governance.py) | governance 與 hook regression tests。 |
+
+Codex adapter reference：[25｜Codex Adapter／Hermes Mapping Layer](docs/25-codex-adapter.md)。驗證 adapter mapping：
+
+```bash
+python3 scripts/codex_adapter.py validate
+```
 
 ## 文件導覽（Progressive Disclosure）
 
