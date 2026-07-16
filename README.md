@@ -1,6 +1,12 @@
 # AI-Native STDD × VDD 工程治理系統
 
+[![Governance shadow validation](https://github.com/trionnemesis/AI-NativeSTDD-VDD/actions/workflows/governance-shadow.yml/badge.svg)](https://github.com/trionnemesis/AI-NativeSTDD-VDD/actions/workflows/governance-shadow.yml)
+[![Python 3.11](https://img.shields.io/badge/python-3.11-blue.svg)](requirements-governance.txt)
+[![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
+
 > 讓 agentic development 對專業人士可信的 verification architecture。
+
+**What**: this repository provides Claude Code-ready governance templates and a machine-readable shadow of an AI-native Specification & Test-Driven Development / Verification & Validation-Driven Development (STDD × VDD) methodology. **Why**: agentic delivery is prone to fake-green or self-certifying tests, spec drift that silently fans out across specs/BDD/UI/API/tests, and uncontrolled self-healing CI that quietly masks real regressions. **How**: it enforces a fixed five-gate pipeline (`GATE:SPEC → GATE:RED → GATE:GREEN → GATE:VDD → GATE:DEPLOY`), strict role separation between test and implementation agents, and evidence-based sign-off rather than model output or a green CI run alone. The methodology's canonical authority remains the linked Notion workspace; this repository is currently a non-authoritative shadow of it.
 
 這個 repository 提供 Claude Code 可採用的治理模板、機器可讀 shadow 與驗證工具；方法論的唯一權威仍是 Notion 的 [AI-Native STDD × VDD 工程治理系統](https://www.notion.so/AI-Native-STDD-VDD-382f5b2d1a9081e9a972f0b33fad3142)。
 
@@ -76,6 +82,31 @@ Signal → GATE:ADMIT → Change Intent
 GATE:SPEC → GATE:RED → GATE:GREEN → GATE:VDD → GATE:DEPLOY
 ```
 
+上述 text 序列為 canonical 引用來源；下圖是同一流程的視覺化版本，僅供快速瀏覽：
+
+```mermaid
+flowchart LR
+    Signal([Signal]) --> ADMIT[GATE:ADMIT]
+    ADMIT --> Intent[Change Intent]
+    Intent --> DeltaSpec[Delta Spec]
+    DeltaSpec --> Impact[Impact Analysis]
+    Impact --> SPEC{{GATE:SPEC}}
+    SPEC --> TestGen[Independent Test Generation]
+    TestGen --> RED{{GATE:RED}}
+    RED --> Impl[AI Implementation]
+    Impl --> GREEN{{GATE:GREEN}}
+    GREEN --> QV[Quality Verification]
+    QV --> VDD{{GATE:VDD}}
+    VDD --> Trace[Traceability Generation]
+    Trace --> Deploy[Controlled Deployment]
+    Deploy --> DEPLOY{{GATE:DEPLOY}}
+    DEPLOY --> ProdVerify[Production Verification]
+    ProdVerify --> Evidence([Signal / Accepted Evidence])
+
+    classDef gate fill:#f9d976,stroke:#b8860b,color:#000;
+    class SPEC,RED,GREEN,VDD,DEPLOY gate;
+```
+
 | Gate | 目的與主要證據 |
 |---|---|
 | [`GATE:ADMIT`](https://app.notion.com/p/388f5b2d1a9081789657dbfc101ca8e6) | 07 上游的 Discovery & Dispatch：signal fingerprint、deterministic dedup、非唯一權威的 LLM-assisted classification、tiered dispatch 與 Change Intent。它不是第六個 pipeline Gate。 |
@@ -128,6 +159,10 @@ GATE:SPEC → GATE:RED → GATE:GREEN → GATE:VDD → GATE:DEPLOY
 | **Full** | Agent security boundary、progressive release、Production Observation、signed provenance、EvalOps、TIA 與受控 Self-Healing。 |
 
 Self-Healing CI 位於 07 之外的維運迴圈：只能 propose PR、不能直接 merge；若改動測試，必須重新建立 Red Evidence。
+
+## 採用案例
+
+- [AIhouskeeperagent](https://github.com/trionnemesis/AIhouskeeperagent)：其專案層 `CLAUDE.md` 所定義的 `GATE:RED` / `GATE:GREEN` runtime hook 概念，參考了本治理系統的 Gate 設計思路。實際 Gate 定義、強制方式與適用範圍以該專案自身文件為準；這不代表該專案已完整採用本 repository 的方法論，或本 repository 已完成 authority cutover。
 
 ## 快速開始：套用 Claude Code 模板
 
