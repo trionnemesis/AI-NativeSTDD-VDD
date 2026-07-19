@@ -5,36 +5,45 @@ on:
     paths:
       - "governance/**"
       - "generated/notion-canonical-view.md"
+      - "generated/semantic-reconciliation-report.md"
       - "scripts/governance.py"
-      - "tests/test_governance.py"
-      - "integrations/codex/**"
+      - "scripts/semantic_reconcile.py"
       - "scripts/codex_adapter.py"
+      - "tests/test_governance.py"
+      - "tests/test_semantic_reconciliation.py"
       - "tests/test_codex_adapter.py"
+      - "integrations/codex/**"
       - "docs/25-codex-adapter.md"
+      - "docs/phase2-semantic-reconciliation.md"
       - "README.md"
       - "requirements-governance.txt"
       - ".claude/hooks/**"
       - ".claude/settings.json"
       - "setup/**"
       - "tests/test_hooks.py"
-      - "integrations/codex/**"
-      - "scripts/codex_adapter.py"
-      - "tests/test_codex_adapter.py"
-      - "docs/25-codex-adapter.md"
-      - "README.md"
       - ".github/workflows/governance-shadow.yml"
   push:
     branches: [main]
     paths:
       - "governance/**"
       - "generated/notion-canonical-view.md"
+      - "generated/semantic-reconciliation-report.md"
       - "scripts/governance.py"
+      - "scripts/semantic_reconcile.py"
+      - "scripts/codex_adapter.py"
       - "tests/test_governance.py"
+      - "tests/test_semantic_reconciliation.py"
+      - "tests/test_codex_adapter.py"
+      - "integrations/codex/**"
+      - "docs/25-codex-adapter.md"
+      - "docs/phase2-semantic-reconciliation.md"
+      - "README.md"
       - "requirements-governance.txt"
       - ".claude/hooks/**"
       - ".claude/settings.json"
       - "setup/**"
       - "tests/test_hooks.py"
+      - ".github/workflows/governance-shadow.yml"
 
 permissions:
   contents: read
@@ -52,5 +61,7 @@ jobs:
       - run: python -m pip install -r requirements-governance.txt
       - run: python scripts/governance.py validate
       - run: python scripts/governance.py render --check
+      - run: python scripts/semantic_reconcile.py validate
+      - run: python scripts/semantic_reconcile.py render --check
       - run: python scripts/codex_adapter.py validate
       - run: python -m unittest discover -s tests -v

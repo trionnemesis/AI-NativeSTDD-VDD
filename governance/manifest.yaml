@@ -10,17 +10,21 @@ authority:
 
 source:
   root_page: "https://app.notion.com/p/382f5b2d1a9081e9a972f0b33fad3142"
+  human_handbook: "https://app.notion.com/p/3a2f5b2d1a9081f7a93ff2af3a6933a9"
+  archive: "https://app.notion.com/p/399f5b2d1a9081afbeb3d7c07cabe014"
+  pre_refactor_snapshot: "https://app.notion.com/p/3a2f5b2d1a9081fe93e1d61c00a7c4b4"
+  semantic_baseline: "governance/reconciliation/notion-archive-baseline.yaml"
   pages:
-    glossary: "root Canonical Glossary YAML"
-    registries: "02 ID Namespace Registry / Gate Registry"
-    gate_spec_red_green_deploy: "07 machine-checkable contracts"
-    gate_vdd: "05 GATE:VDD executable contract"
-    gate_admit: "14 GATE:ADMIT machine-checkable contract"
-    gate_regression: "23 GATE:REGRESSION normative section"
-    profiles: "24 System / Change Profiles"
-    governance_lifecycle: "19"
-    evidence: "21"
-    release: "22"
+    glossary: "Archive pre-refactor root Canonical Glossary YAML"
+    registries: "Archive page 02 ID Namespace Registry / Gate Registry"
+    gate_spec_red_green_deploy: "Archive page 07 machine-checkable contracts"
+    gate_vdd: "Archive page 05 GATE:VDD executable contract"
+    gate_admit: "Archive page 14 GATE:ADMIT machine-checkable contract"
+    gate_regression: "Archive page 23 GATE:REGRESSION normative section"
+    profiles: "Archive page 24 System / Change Profiles"
+    governance_lifecycle: "Archive page 19"
+    evidence: "Archive page 21"
+    release: "Archive page 22"
 
 canonical_pipeline:
   - "GATE:SPEC"
@@ -47,14 +51,26 @@ artifacts:
   change_profiles: "governance/profiles/change.yaml"
   applicability: "governance/profiles/applicability.yaml"
   schemas: "governance/schemas/*.schema.json"
+  semantic_baseline: "governance/reconciliation/notion-archive-baseline.yaml"
+  semantic_report: "generated/semantic-reconciliation-report.md"
   generated_view: "generated/notion-canonical-view.md"
+
+semantic_reconciliation:
+  phase: 2
+  mcr_id: "MCR:2026:008"
+  status: "PASSED_PHASE2"
+  scope: "machine_contract_projection_v1"
+  baseline: "governance/reconciliation/notion-archive-baseline.yaml"
+  report: "generated/semantic-reconciliation-report.md"
+  validated_by: "scripts/semantic_reconcile.py"
+  authority_unchanged: true
 
 cutover_preconditions:
   target_repository_selected: true
   repository_layout_committed: true
   schema_validation_pass: true
   stable_id_and_reference_lint_pass: true
-  notion_to_repo_semantic_hash_match: false
+  notion_to_repo_semantic_hash_match: true
   five_gate_conformance_tests_pass: true
   notion_generation_is_idempotent: true
   rollback_dry_run_pass: false

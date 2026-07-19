@@ -3,7 +3,7 @@
   "$id": "https://github.com/trionnemesis/AI-NativeSTDD-VDD/governance/schemas/manifest.schema.json",
   "title": "Governance authority manifest",
   "type": "object",
-  "required": ["schema_version", "mcr_id", "authority", "canonical_pipeline", "cutover_preconditions", "invariants"],
+  "required": ["schema_version", "mcr_id", "authority", "canonical_pipeline", "semantic_reconciliation", "cutover_preconditions", "invariants"],
   "properties": {
     "mcr_id": {"const": "MCR:2026:004"},
     "authority": {
@@ -12,6 +12,15 @@
     },
     "canonical_pipeline": {
       "const": ["GATE:SPEC", "GATE:RED", "GATE:GREEN", "GATE:VDD", "GATE:DEPLOY"]
+    },
+    "semantic_reconciliation": {
+      "type": "object",
+      "required": ["phase", "mcr_id", "status", "baseline", "report", "validated_by", "authority_unchanged"],
+      "properties": {
+        "phase": {"const": 2},
+        "status": {"const": "PASSED_PHASE2"},
+        "authority_unchanged": {"const": true}
+      }
     },
     "cutover_preconditions": {"type": "object"},
     "invariants": {"type": "object"}
