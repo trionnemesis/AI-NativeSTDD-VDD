@@ -3,6 +3,10 @@ name: Governance shadow validation
 on:
   pull_request:
     paths:
+      - "AGENTS.md"
+      - "CLAUDE.md"
+      - "skills/**"
+      - ".claude/skills/**"
       - "governance/**"
       - "generated/notion-canonical-view.md"
       - "scripts/governance.py"
@@ -26,6 +30,10 @@ on:
   push:
     branches: [main]
     paths:
+      - "AGENTS.md"
+      - "CLAUDE.md"
+      - "skills/**"
+      - ".claude/skills/**"
       - "governance/**"
       - "generated/notion-canonical-view.md"
       - "scripts/governance.py"
@@ -52,5 +60,6 @@ jobs:
       - run: python -m pip install -r requirements-governance.txt
       - run: python scripts/governance.py validate
       - run: python scripts/governance.py render --check
+      - run: python scripts/governance.py render-skills --check
       - run: python scripts/codex_adapter.py validate
       - run: python -m unittest discover -s tests -v

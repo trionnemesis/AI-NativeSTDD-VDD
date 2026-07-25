@@ -1,5 +1,6 @@
 import copy
 import importlib.util
+import tempfile
 import unittest
 from pathlib import Path
 
@@ -45,6 +46,34 @@ class GovernanceShadowTests(unittest.TestCase):
         self.assertEqual(first, second)
         self.assertEqual((ROOT / "generated" / "notion-canonical-view.md").read_text(), first)
 
+    def test_skill_runtime_projections_are_deterministic_and_current(self):
+        first = governance_script.render_skill_projections(ROOT)
+        second = governance_script.render_skill_projections(ROOT)
+        expected = {
+            Path(".claude") / "skills" / source.parent.name / "SKILL.md"
+            for source in (ROOT / "skills").glob("*/SKILL.md")
+        }
+        self.assertEqual(first, second)
+        self.assertEqual(set(first), expected)
+        for relative_path, rendered in first.items():
+            self.assertEqual((ROOT / relative_path).read_text(encoding="utf-8"), rendered)
+        self.assertEqual(governance_script.skill_projection_drift(ROOT), [])
+
+    def test_skill_projection_drift_check_fails_closed(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            source = root / "skills" / "example" / "SKILL.md"
+            source.parent.mkdir(parents=True)
+            source.write_text("---\nname: example\n---\n\n# Example\n", encoding="utf-8")
+
+            self.assertTrue(governance_script.skill_projection_drift(root))
+            governance_script.write_skill_projections(root)
+            self.assertEqual(governance_script.skill_projection_drift(root), [])
+
+            runtime_projection = root / ".claude" / "skills" / "example" / "SKILL.md"
+            runtime_projection.write_text("stale\n", encoding="utf-8")
+            self.assertTrue(governance_script.skill_projection_drift(root))
+
     def test_all_yaml_files_parse(self):
         for path in (ROOT / "governance").rglob("*.yaml"):
             with self.subTest(path=path.relative_to(ROOT)):
@@ -56,10 +85,22 @@ class GovernanceShadowTests(unittest.TestCase):
         self.assertIn("pull_request", workflow["on"])
         self.assertIn("push", workflow["on"])
         self.assertIn(".github/workflows/governance-shadow.yml", workflow["on"]["pull_request"]["paths"])
+        required_paths = {"AGENTS.md", "CLAUDE.md", "skills/**", ".claude/skills/**"}
+        for event in ("pull_request", "push"):
+            self.assertTrue(
+                required_paths.issubset(set(workflow["on"][event]["paths"])),
+                f"{event} path filters do not cover all agent instruction surfaces",
+            )
         self.assertEqual(workflow["permissions"]["contents"], "read")
         self.assertIn("validate", workflow["jobs"])
         setup_python = workflow["jobs"]["validate"]["steps"][1]
         self.assertEqual(setup_python["with"]["cache-dependency-path"], "requirements-governance.txt")
+        run_steps = {
+            step["run"]
+            for step in workflow["jobs"]["validate"]["steps"]
+            if "run" in step
+        }
+        self.assertIn("python scripts/governance.py render-skills --check", run_steps)
 
 
 if __name__ == "__main__":
