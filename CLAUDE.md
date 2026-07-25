@@ -7,7 +7,7 @@
 1. 讀取 `AGENTS.md`。
 2. 讀取 `governance/manifest.yaml`。
 3. 從 `AGENTS.md` 選擇一個 task bundle，只載入該 bundle 的檔案。
-4. 若任務需要宣稱 target project readiness 或 enforcement，讀取 `setup/AGENT_SETUP_PROTOCOL.md` 並執行 Confirm Mode。
+4. 任何新任務都先讀取 `setup/AGENT_SETUP_PROTOCOL.md` 並執行 Confirm Mode；有項目失敗時先進入 Configure Mode。
 
 預設不得載入完整 `docs/` tree、Notion workspace、assessment archive、media 或 MCR history。
 

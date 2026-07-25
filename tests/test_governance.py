@@ -74,6 +74,27 @@ class GovernanceShadowTests(unittest.TestCase):
             runtime_projection.write_text("stale\n", encoding="utf-8")
             self.assertTrue(governance_script.skill_projection_drift(root))
 
+            governance_script.write_skill_projections(root)
+            renamed = root / "skills" / "renamed" / "SKILL.md"
+            renamed.parent.mkdir(parents=True)
+            source.replace(renamed)
+            governance_script.write_skill_projections(root)
+
+            self.assertFalse(runtime_projection.exists())
+            self.assertTrue(
+                (root / ".claude" / "skills" / "renamed" / "SKILL.md").is_file()
+            )
+            self.assertEqual(governance_script.skill_projection_drift(root), [])
+
+            manual = root / ".claude" / "skills" / "manual" / "SKILL.md"
+            manual.parent.mkdir(parents=True)
+            manual.write_text("# Manually managed runtime skill\n", encoding="utf-8")
+            governance_script.write_skill_projections(root)
+            self.assertEqual(
+                manual.read_text(encoding="utf-8"),
+                "# Manually managed runtime skill\n",
+            )
+
     def test_all_yaml_files_parse(self):
         for path in (ROOT / "governance").rglob("*.yaml"):
             with self.subTest(path=path.relative_to(ROOT)):

@@ -31,6 +31,7 @@ FROZEN_PIPELINE = [
     "GATE:DEPLOY",
 ]
 ID_REFERENCE = re.compile(r"\b(?:TERM|GATE):[A-Z0-9][A-Z0-9_-]*\b")
+GENERATED_SKILL_MARKER = "<!-- GENERATED RUNTIME PROJECTION — DO NOT EDIT."
 
 
 class GovernanceValidationError(RuntimeError):
@@ -281,11 +282,25 @@ def render_skill_projections(root: Path = ROOT) -> dict[Path, str]:
         require(frontmatter_end >= 0, f"{source_relative} is missing closing YAML frontmatter")
         insert_at = frontmatter_end + len("\n---\n")
         notice = (
-            f"\n<!-- GENERATED RUNTIME PROJECTION — DO NOT EDIT. Source: `{source_relative.as_posix()}`. "
+            f"\n{GENERATED_SKILL_MARKER} Source: `{source_relative.as_posix()}`. "
             "Skill discovery is prompt/config availability, not runtime enforcement. -->\n"
         )
         projections[runtime_relative] = content[:insert_at] + notice + content[insert_at:]
     return projections
+
+
+def runtime_skill_paths(root: Path = ROOT) -> set[Path]:
+    runtime_root = root / ".claude" / "skills"
+    require(not runtime_root.is_symlink(), ".claude/skills must not be a symlink")
+    paths: set[Path] = set()
+    for path in runtime_root.glob("*/SKILL.md"):
+        require(
+            not path.is_symlink() and not path.parent.is_symlink(),
+            f"runtime skill projection must not cross a symlink: {path.relative_to(root)}",
+        )
+        if path.is_file():
+            paths.add(path.relative_to(root))
+    return paths
 
 
 def skill_projection_drift(root: Path = ROOT) -> list[str]:
@@ -298,25 +313,33 @@ def skill_projection_drift(root: Path = ROOT) -> list[str]:
         elif projection.read_text(encoding="utf-8") != rendered:
             drift.append(f"stale runtime skill projection: {relative_path.as_posix()}")
 
-    runtime_root = root / ".claude" / "skills"
-    actual = {
-        path.relative_to(root)
-        for path in runtime_root.glob("*/SKILL.md")
-        if path.is_file()
-    }
+    actual = runtime_skill_paths(root)
     for relative_path in sorted(actual - set(expected)):
         drift.append(f"unexpected runtime skill projection: {relative_path.as_posix()}")
     return drift
 
 
-def write_skill_projections(root: Path = ROOT) -> list[Path]:
+def write_skill_projections(root: Path = ROOT) -> tuple[list[Path], list[Path]]:
+    expected = render_skill_projections(root)
+    removed: list[Path] = []
+    for relative_path in sorted(runtime_skill_paths(root) - set(expected)):
+        projection = root / relative_path
+        if GENERATED_SKILL_MARKER not in projection.read_text(encoding="utf-8"):
+            continue
+        projection.unlink()
+        removed.append(relative_path)
+        try:
+            projection.parent.rmdir()
+        except OSError:
+            pass
+
     written: list[Path] = []
-    for relative_path, rendered in render_skill_projections(root).items():
+    for relative_path, rendered in expected.items():
         projection = root / relative_path
         projection.parent.mkdir(parents=True, exist_ok=True)
         projection.write_text(rendered, encoding="utf-8")
         written.append(relative_path)
-    return written
+    return written, removed
 
 
 def command_validate() -> int:
@@ -355,11 +378,13 @@ def command_render_skills(check: bool) -> int:
             print("runtime skill projections are current")
             return 0
 
-        written = write_skill_projections(ROOT)
+        written, removed = write_skill_projections(ROOT)
     except (GovernanceValidationError, OSError, ValueError) as exc:
         print(f"skill projection render failed: {exc}", file=sys.stderr)
         return 1
 
+    for relative_path in removed:
+        print(f"removed obsolete {relative_path.as_posix()}")
     for relative_path in written:
         print(f"rendered {relative_path.as_posix()}")
     return 0
