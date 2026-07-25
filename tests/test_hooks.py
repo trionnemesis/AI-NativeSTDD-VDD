@@ -268,7 +268,7 @@ class HookTests(unittest.TestCase):
             write_policy(base, test_roots=["checks"])
             test = base / "checks" / "test_ok.py"
             test.parent.mkdir()
-            test.write_text("def test_ok():\n    assert 1 == 1\n")
+            test.write_text("def test_ok():\n    value = 1\n    assert value == 1\n")
             phase = base / ".vdd" / "phase"
             phase.write_text("RED_VERIFIED")
 
