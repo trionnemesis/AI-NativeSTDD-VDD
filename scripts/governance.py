@@ -31,6 +31,7 @@ FROZEN_PIPELINE = [
     "GATE:DEPLOY",
 ]
 ID_REFERENCE = re.compile(r"\b(?:TERM|GATE):[A-Z0-9][A-Z0-9_-]*\b")
+GENERATED_SKILL_MARKER = "<!-- GENERATED RUNTIME PROJECTION — DO NOT EDIT."
 
 
 class GovernanceValidationError(RuntimeError):
@@ -270,6 +271,77 @@ def render_markdown(root: Path = ROOT) -> str:
     return "\n".join(lines)
 
 
+def render_skill_projections(root: Path = ROOT) -> dict[Path, str]:
+    projections: dict[Path, str] = {}
+    for source in sorted((root / "skills").glob("*/SKILL.md")):
+        source_relative = source.relative_to(root)
+        runtime_relative = Path(".claude") / "skills" / source.parent.name / "SKILL.md"
+        content = source.read_text(encoding="utf-8")
+        require(content.startswith("---\n"), f"{source_relative} is missing opening YAML frontmatter")
+        frontmatter_end = content.find("\n---\n", len("---\n"))
+        require(frontmatter_end >= 0, f"{source_relative} is missing closing YAML frontmatter")
+        insert_at = frontmatter_end + len("\n---\n")
+        notice = (
+            f"\n{GENERATED_SKILL_MARKER} Source: `{source_relative.as_posix()}`. "
+            "Skill discovery is prompt/config availability, not runtime enforcement. -->\n"
+        )
+        projections[runtime_relative] = content[:insert_at] + notice + content[insert_at:]
+    return projections
+
+
+def runtime_skill_paths(root: Path = ROOT) -> set[Path]:
+    runtime_root = root / ".claude" / "skills"
+    require(not runtime_root.is_symlink(), ".claude/skills must not be a symlink")
+    paths: set[Path] = set()
+    for path in runtime_root.glob("*/SKILL.md"):
+        require(
+            not path.is_symlink() and not path.parent.is_symlink(),
+            f"runtime skill projection must not cross a symlink: {path.relative_to(root)}",
+        )
+        if path.is_file():
+            paths.add(path.relative_to(root))
+    return paths
+
+
+def skill_projection_drift(root: Path = ROOT) -> list[str]:
+    expected = render_skill_projections(root)
+    drift: list[str] = []
+    for relative_path, rendered in expected.items():
+        projection = root / relative_path
+        if not projection.exists():
+            drift.append(f"missing runtime skill projection: {relative_path.as_posix()}")
+        elif projection.read_text(encoding="utf-8") != rendered:
+            drift.append(f"stale runtime skill projection: {relative_path.as_posix()}")
+
+    actual = runtime_skill_paths(root)
+    for relative_path in sorted(actual - set(expected)):
+        drift.append(f"unexpected runtime skill projection: {relative_path.as_posix()}")
+    return drift
+
+
+def write_skill_projections(root: Path = ROOT) -> tuple[list[Path], list[Path]]:
+    expected = render_skill_projections(root)
+    removed: list[Path] = []
+    for relative_path in sorted(runtime_skill_paths(root) - set(expected)):
+        projection = root / relative_path
+        if GENERATED_SKILL_MARKER not in projection.read_text(encoding="utf-8"):
+            continue
+        projection.unlink()
+        removed.append(relative_path)
+        try:
+            projection.parent.rmdir()
+        except OSError:
+            pass
+
+    written: list[Path] = []
+    for relative_path, rendered in expected.items():
+        projection = root / relative_path
+        projection.parent.mkdir(parents=True, exist_ok=True)
+        projection.write_text(rendered, encoding="utf-8")
+        written.append(relative_path)
+    return written, removed
+
+
 def command_validate() -> int:
     try:
         summary = validate_repo(ROOT)
@@ -295,18 +367,45 @@ def command_render(check: bool) -> int:
     return 0
 
 
+def command_render_skills(check: bool) -> int:
+    try:
+        if check:
+            drift = skill_projection_drift(ROOT)
+            if drift:
+                for message in drift:
+                    print(message, file=sys.stderr)
+                return 1
+            print("runtime skill projections are current")
+            return 0
+
+        written, removed = write_skill_projections(ROOT)
+    except (GovernanceValidationError, OSError, ValueError) as exc:
+        print(f"skill projection render failed: {exc}", file=sys.stderr)
+        return 1
+
+    for relative_path in removed:
+        print(f"removed obsolete {relative_path.as_posix()}")
+    for relative_path in written:
+        print(f"rendered {relative_path.as_posix()}")
+    return 0
+
+
 def main() -> int:
     parser = argparse.ArgumentParser()
     subparsers = parser.add_subparsers(dest="command", required=True)
     subparsers.add_parser("validate")
     render_parser = subparsers.add_parser("render")
     render_parser.add_argument("--check", action="store_true")
+    render_skills_parser = subparsers.add_parser("render-skills")
+    render_skills_parser.add_argument("--check", action="store_true")
     subparsers.add_parser("digest")
     args = parser.parse_args()
     if args.command == "validate":
         return command_validate()
     if args.command == "render":
         return command_render(args.check)
+    if args.command == "render-skills":
+        return command_render_skills(args.check)
     print(bundle_digest(ROOT))
     return 0
 

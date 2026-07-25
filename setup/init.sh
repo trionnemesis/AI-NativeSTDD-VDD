@@ -111,6 +111,14 @@ echo "[P1b] 複製 agent 入口文件..."
 if [ "$TARGET_DIR" = "$SCRIPT_DIR" ]; then
   echo "  Template repo 內執行，文件已在正確位置"
 else
+  if [ ! -f "$TARGET/AGENTS.md" ] && [ -f "$SCRIPT_DIR/AGENTS.md" ]; then
+    cp "$SCRIPT_DIR/AGENTS.md" "$TARGET/AGENTS.md"
+    echo "  Copied AGENTS.md"
+  elif [ -f "$TARGET/AGENTS.md" ]; then
+    cp "$SCRIPT_DIR/AGENTS.md" "$TARGET/AGENTS.stdd-vdd.md"
+    echo "  AGENTS.md 已存在，Copied AGENTS.stdd-vdd.md for merge"
+  fi
+
   if [ ! -f "$TARGET/CLAUDE.md" ] && [ -f "$SCRIPT_DIR/CLAUDE.md" ]; then
     cp "$SCRIPT_DIR/CLAUDE.md" "$TARGET/CLAUDE.md"
     echo "  Copied CLAUDE.md"

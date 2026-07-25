@@ -102,6 +102,18 @@ class HookTests(unittest.TestCase):
             with self.subTest(key=key):
                 self.assertIn(f"`{key}`", reference)
 
+    def test_claude_adapter_requires_confirm_mode_for_every_task(self):
+        adapter = (ROOT / "CLAUDE.md").read_text()
+        protocol = (ROOT / "setup" / "AGENT_SETUP_PROTOCOL.md").read_text()
+        confirm_action = next(
+            line
+            for line in adapter.splitlines()
+            if line.startswith("4.") and "Confirm Mode" in line
+        )
+
+        self.assertIn("任何新任務", confirm_action)
+        self.assertIn("任何新任務", protocol)
+
     def test_default_pre_impl_gate_preserves_existing_red_contract(self):
         with tempfile.TemporaryDirectory() as tmp:
             base = Path(tmp)
@@ -268,7 +280,7 @@ class HookTests(unittest.TestCase):
             write_policy(base, test_roots=["checks"])
             test = base / "checks" / "test_ok.py"
             test.parent.mkdir()
-            test.write_text("def test_ok():\n    assert 1 == 1\n")
+            test.write_text("def test_ok():\n    value = 1\n    assert value == 1\n")
             phase = base / ".vdd" / "phase"
             phase.write_text("RED_VERIFIED")
 
@@ -316,6 +328,10 @@ class HookTests(unittest.TestCase):
             self.assertTrue((target / "specs" / "features").is_dir())
             self.assertTrue((target / ".claude" / "agents" / "red-verifier.md").is_file())
             self.assertEqual(
+                (target / "AGENTS.md").read_text(),
+                (ROOT / "AGENTS.md").read_text(),
+            )
+            self.assertEqual(
                 json.loads((target / ".vdd" / "path-policy.json").read_text()),
                 PATH_POLICY.DEFAULT_POLICY,
             )
@@ -337,6 +353,7 @@ class HookTests(unittest.TestCase):
                 )
             )
             first = run_init(target, source)
+            (target / "AGENTS.md").write_text("# Project-specific agent policy\n")
             (target / ".vdd" / "phase").write_text("RED_VERIFIED")
             sentinel = target / ".vdd" / "sentinel"
             sentinel.write_text("keep")
@@ -347,6 +364,14 @@ class HookTests(unittest.TestCase):
             self.assertFalse((target / "specs").exists())
             self.assertEqual((target / ".vdd" / "phase").read_text(), "RED_VERIFIED")
             self.assertEqual(sentinel.read_text(), "keep")
+            self.assertEqual(
+                (target / "AGENTS.md").read_text(),
+                "# Project-specific agent policy\n",
+            )
+            self.assertEqual(
+                (target / "AGENTS.stdd-vdd.md").read_text(),
+                (ROOT / "AGENTS.md").read_text(),
+            )
             self.assertIn("validated in place", second.stdout)
 
     def test_init_rejects_invalid_policy_without_replacing_existing(self):
