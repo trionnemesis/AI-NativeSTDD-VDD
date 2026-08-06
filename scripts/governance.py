@@ -13,12 +13,12 @@ import hashlib
 import json
 import re
 import sys
+from collections.abc import Iterable
 from pathlib import Path
-from typing import Any, Iterable
+from typing import Any
 
 import yaml
 from jsonschema import Draft202012Validator
-
 
 ROOT = Path(__file__).resolve().parents[1]
 GOVERNANCE = ROOT / "governance"

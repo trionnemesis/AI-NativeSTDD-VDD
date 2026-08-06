@@ -6,7 +6,6 @@ import sys
 
 from path_policy import PolicyError, load_policy, project_root
 
-
 data = json.load(sys.stdin)
 command = data.get("tool_input", {}).get("command", "")
 

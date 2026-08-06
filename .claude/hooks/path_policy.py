@@ -13,7 +13,6 @@ import sys
 from pathlib import Path, PurePosixPath
 from typing import Any
 
-
 CONFIG_PATH = Path(".vdd/path-policy.json")
 DEFAULT_POLICY: dict[str, Any] = {
     "implementation_roots": ["src"],

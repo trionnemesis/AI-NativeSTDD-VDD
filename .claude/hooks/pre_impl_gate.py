@@ -12,8 +12,8 @@ from path_policy import (
     load_policy,
     path_in_roots,
     project_root,
-    repo_relative_path,
     red_evidence_path,
+    repo_relative_path,
 )
 
 data = json.load(sys.stdin)

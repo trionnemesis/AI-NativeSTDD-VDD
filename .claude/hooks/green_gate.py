@@ -44,6 +44,7 @@ for index, command in enumerate(commands, start=1):
             stderr=subprocess.DEVNULL,
             cwd=project_root(),
             timeout=COMMAND_TIMEOUT_SECONDS,
+            check=False,
         )
     except (OSError, PolicyError, subprocess.TimeoutExpired) as exc:
         executable = command[0] if command else "<unresolved>"
