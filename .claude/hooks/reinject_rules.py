@@ -5,7 +5,6 @@ import sys
 
 from path_policy import PolicyError, load_policy
 
-
 try:
     policy = load_policy()
 except PolicyError as exc:

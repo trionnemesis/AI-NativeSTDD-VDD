@@ -10,7 +10,6 @@ from typing import Any
 
 import yaml
 
-
 ROOT = Path(__file__).resolve().parents[1]
 ADAPTER = ROOT / "integrations" / "codex" / "adapter.yaml"
 FROZEN_PIPELINE = ["GATE:SPEC", "GATE:RED", "GATE:GREEN", "GATE:VDD", "GATE:DEPLOY"]

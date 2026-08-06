@@ -35,13 +35,14 @@ if admit_queue.exists() and admit_queue.stat().st_size > 0:
 try:
     result = subprocess.run(
         ["git", "diff", "--name-only", "--", *policy["spec_change_paths"]],
-        capture_output=True, text=True, errors="replace", timeout=3, cwd=root
+        capture_output=True, text=True, errors="replace", timeout=3, cwd=root,
+        check=False,
     )
     if result.returncode == 0 and result.stdout.strip():
         changed = result.stdout.strip().split("\n")
         output_lines.append(f"[STDD×VDD] Modified spec files: {', '.join(changed[:5])}")
-except Exception:
-    pass
+except (OSError, subprocess.SubprocessError) as exc:
+    print(f"[STDD×VDD] spec diff skipped: {exc}", file=sys.stderr)
 
 if output_lines:
     print("\n".join(output_lines))

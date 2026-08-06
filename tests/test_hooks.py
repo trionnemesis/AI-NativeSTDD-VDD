@@ -9,7 +9,6 @@ import tempfile
 import unittest
 from pathlib import Path
 
-
 ROOT = Path(__file__).resolve().parents[1]
 POLICY_SPEC = importlib.util.spec_from_file_location(
     "path_policy", ROOT / ".claude" / "hooks" / "path_policy.py"
@@ -26,6 +25,7 @@ def run_hook(script, cwd, payload, env=None):
         capture_output=True,
         text=True,
         env=env,
+        check=False,
     )
 
 
@@ -51,6 +51,7 @@ def run_init(target, policy_source=None):
         command,
         cwd=ROOT,
         capture_output=True,
+        check=False,
         text=True,
         env={**os.environ, "PATH": f"{fake_bin}{os.pathsep}{os.environ['PATH']}"},
     )
@@ -316,6 +317,7 @@ class HookTests(unittest.TestCase):
             text=True,
             shell=True,
             env={**os.environ, "CLAUDE_PROJECT_DIR": str(ROOT)},
+            check=False,
         )
         self.assertEqual(result.returncode, 0, result.stderr)
 
