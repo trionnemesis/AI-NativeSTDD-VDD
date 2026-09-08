@@ -1088,6 +1088,71 @@ class HookTests(unittest.TestCase):
             # 指向 target 之外的檔案不得被改動
             self.assertEqual(json.loads(elsewhere.read_text()), {"hooks": {}})
 
+    def test_read_isolation_guard_checks_containment_of_glob_prefixes(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            base = Path(tmp)
+            write_policy(base, implementation_roots=["app"], test_roots=["app/checks"])
+            (base / "app" / "checks").mkdir(parents=True)
+            (base / "app" / "lib").mkdir()
+            (base / "app" / "checks" / "test_a.py").write_text("t\n")
+            (base / ".vdd" / "phase").write_text("RED_VERIFIED")
+
+            # 字面前綴 app 分類是 implementation，但巢狀的 test root 就在它底下
+            blocked = run_hook(
+                ".claude/hooks/read_isolation_guard.py",
+                base,
+                {"tool_name": "Glob", "tool_input": {"pattern": "app/**/*.py"}},
+            )
+            allowed = run_hook(
+                ".claude/hooks/read_isolation_guard.py",
+                base,
+                {"tool_name": "Glob", "tool_input": {"pattern": "app/lib/**/*.py"}},
+            )
+
+            self.assertEqual(blocked.returncode, 2, blocked.stderr)
+            self.assertEqual(allowed.returncode, 0, allowed.stderr)
+
+    def test_read_isolation_guard_skips_scope_checks_when_side_is_absent(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            base = Path(tmp)
+            write_policy(base, implementation_roots=["app"], test_roots=["checks"])
+            (base / "app").mkdir()
+            (base / ".vdd" / "phase").write_text("RED_VERIFIED")
+
+            absent = run_hook(
+                ".claude/hooks/read_isolation_guard.py",
+                base,
+                {"tool_name": "Grep", "tool_input": {"pattern": "x", "path": "."}},
+            )
+            (base / "checks").mkdir()
+            present = run_hook(
+                ".claude/hooks/read_isolation_guard.py",
+                base,
+                {"tool_name": "Grep", "tool_input": {"pattern": "x", "path": "."}},
+            )
+
+            self.assertEqual(absent.returncode, 0, absent.stderr)
+            self.assertEqual(present.returncode, 2, present.stderr)
+
+    def test_policy_rejects_a_root_declared_in_two_categories(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            base = Path(tmp)
+            write_policy(base, implementation_roots=["app"], test_roots=["app"])
+            (base / "app").mkdir()
+            (base / ".vdd" / "phase").write_text("INIT")
+
+            # 巢狀由最長匹配解決，但完全相同的 root 沒有正確解讀方式：
+            # 靜默挑一邊就等於把另一邊放行。
+            result = run_hook(
+                ".claude/hooks/read_isolation_guard.py",
+                base,
+                {"tool_name": "Read", "tool_input": {"file_path": "app/prod.py"}},
+            )
+
+            self.assertEqual(result.returncode, 2, result.stderr)
+            self.assertIn("PATH POLICY", result.stderr)
+            self.assertIn("exactly one category", result.stderr)
+
     def test_setup_protocol_documents_the_read_side_guard(self):
         protocol = (ROOT / "setup" / "AGENT_SETUP_PROTOCOL.md").read_text()
 

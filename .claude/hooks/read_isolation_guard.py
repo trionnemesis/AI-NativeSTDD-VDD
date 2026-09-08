@@ -70,12 +70,15 @@ def forbidden_target(tool_name, tool_input, policy, phase):
             return value, "forbidden"
         return None
 
+    # 隔離側不存在就沒有東西可穿進去，所有 scope 保守判定一併跳過。
+    side_exists = isolated_side_exists(policy, forbidden)
+
     base = text_field(tool_input, "path")
     if base:
         if classify_path(base, policy) == forbidden:
             return base, "forbidden"
         # path="." 分類是 other，卻涵蓋整個 repository；錨定必須排除這種 scope。
-        if scope_reaches_forbidden(base, policy, forbidden):
+        if side_exists and scope_reaches_forbidden(base, policy, forbidden):
             return base, "scope"
 
     # Glob 的 pattern 本身就是 path glob；Grep 的 glob 只是檔名 filter。
@@ -85,10 +88,14 @@ def forbidden_target(tool_name, tool_input, policy, phase):
         anchored = f"{base}/{prefix}" if base else prefix
         if classify_path(anchored, policy) == forbidden:
             return anchored, "forbidden"
+        # 字面前綴同樣是 scope：app/**/*.py 的前綴 app 分類是 implementation，
+        # 但巢狀的 test_roots=["app/checks"] 就在它底下。
+        if side_exists and scope_reaches_forbidden(anchored, policy, forbidden):
+            return anchored, "scope"
 
     # 既沒有 path 也沒有字面前綴 → 例如 **/checks/**/*.py 或不帶 path 的 Grep。
     # 這種 pattern 能穿進被隔離的那一側，而 hook 無法證明它不會，因此保守擋下。
-    if base is None and not prefix and isolated_side_exists(policy, forbidden):
+    if base is None and not prefix and side_exists:
         return (pattern or "<no path>"), "unanchored"
     return None
 

@@ -198,7 +198,32 @@ def load_policy(path: Path | None = None) -> dict[str, Any]:
     policy["test_roots"] = _validate_string_list(
         policy["test_roots"], "test_roots", paths=True
     )
+    _reject_ambiguous_roots(policy)
     return policy
+
+
+def _reject_ambiguous_roots(policy: dict[str, Any]) -> None:
+    """Reject a root declared in more than one classification category.
+
+    Nesting is a legitimate layout and is resolved by longest match, but exact
+    equality has no correct reading: classify_path would have to pick a side, and
+    silently picking one exposes the other. Fail loudly instead.
+    """
+    categories = (
+        ("protected_spec_roots", policy["protected_spec_roots"]),
+        ("test_roots", policy["test_roots"]),
+        ("implementation_roots", policy["implementation_roots"]),
+    )
+    seen: dict[str, str] = {}
+    for label, roots in categories:
+        for root in roots:
+            previous = seen.get(root)
+            if previous is not None:
+                raise PolicyError(
+                    f"{root!r} is declared in both {previous} and {label}; "
+                    "a root must belong to exactly one category"
+                )
+            seen[root] = label
 
 
 COLOCATED_SCAN_LIMIT = 5000
