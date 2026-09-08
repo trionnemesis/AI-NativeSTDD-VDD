@@ -96,10 +96,13 @@ READER_OPTIONS = {
 }
 NO_VALUE_OPTIONS = {"value": "", "pattern": "", "file": ""}
 PATTERN_LONG_OPTIONS = frozenset({"--regexp", "--file", "--expression"})
-FILE_LONG_OPTIONS = frozenset({"--file"})
-VALUE_LONG_OPTIONS = PATTERN_LONG_OPTIONS | frozenset(
+# --exclude-from 不提供搜尋 pattern，但 grep 仍會開啟並讀取這個檔案。
+FILE_LONG_OPTIONS = frozenset({"--file", "--exclude-from", "--include-from"})
+VALUE_LONG_OPTIONS = PATTERN_LONG_OPTIONS | FILE_LONG_OPTIONS | frozenset(
     {"--max-count", "--include", "--exclude", "--glob", "--type"}
 )
+# rg 的這些模式沒有 pattern operand，第一個 positional 就是路徑。
+NO_PATTERN_OPTIONS = frozenset({"--files", "--type-list", "--help", "--version"})
 # 分組語法與 command prefix 必須先剝掉，否則 (cat x 的命令名會是 "(cat"。
 # prefix 自己的選項也要吃掉，否則 command -p cat x 的命令名會變成 "-p"。
 COMMAND_PREFIXES = {
@@ -239,7 +242,15 @@ def path_operands(name, tokens):
         pattern_supplied = pattern_supplied or supplied
         if file_value:
             file_values.append(file_value)
-    if name in PATTERN_FIRST_READERS and not pattern_supplied and operands:
+    no_pattern_mode = any(
+        token.split("=", 1)[0] in NO_PATTERN_OPTIONS for token in tokens
+    )
+    if (
+        name in PATTERN_FIRST_READERS
+        and not pattern_supplied
+        and not no_pattern_mode
+        and operands
+    ):
         operands = operands[1:]
     return operands + file_values
 
@@ -270,6 +281,9 @@ def read_targets(shell_command, root):
     """
     targets = []
     # cd 可能失敗，shell 會留在原目錄，所以候選 cwd 是一組而不是一個。
+    # success_cwd 是「每個 cd 都成功」的路徑，也是最可能的真實 cwd，
+    # 截斷候選時必須優先保留它，否則長鏈 cd 會把真正的位置擠掉。
+    success_cwd = root
     cwds = [root]
     # 換行在 shell 裡也是 command separator；<( 與 >( 是 process substitution，
     # 其括號內是另一個完整命令，與 $( 一樣要當成獨立 segment。
@@ -289,12 +303,16 @@ def read_targets(shell_command, root):
                 character in destinations[0] for character in OPAQUE_CD_ARGUMENT
             )
             if opaque:
+                success_cwd = root
                 cwds = [root]
             else:
                 # cd 可能失敗，所以每個既有候選都要保留，再加上它的成功目的地。
+                success_cwd = success_cwd / destinations[0]
                 cwds = list(
                     dict.fromkeys(
-                        cwds + [candidate / destinations[0] for candidate in cwds]
+                        [success_cwd, root]
+                        + cwds
+                        + [candidate / destinations[0] for candidate in cwds]
                     )
                 )[:CWD_CANDIDATE_LIMIT]
         elif name in READ_COMMANDS:

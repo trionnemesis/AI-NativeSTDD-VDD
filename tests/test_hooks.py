@@ -1424,6 +1424,85 @@ class HookTests(unittest.TestCase):
             self.assertEqual(blocked.returncode, 2, blocked.stderr)
             self.assertEqual(allowed.returncode, 0, allowed.stderr)
 
+    def test_bash_guard_keeps_the_all_success_cwd_within_the_cap(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            base = Path(tmp)
+            write_policy(base, implementation_roots=["app"], test_roots=["checks"])
+            (base / "app").mkdir()
+            (base / "checks").mkdir()
+            (base / "a" / "b" / "c" / "d").mkdir(parents=True)
+            (base / ".vdd" / "phase").write_text("RED_VERIFIED")
+
+            # 四次成功的 cd 會讓候選數超過上限；截斷不得把真正的 cwd 擠掉
+            result = run_hook(
+                ".claude/hooks/bash_guard.py",
+                base,
+                {
+                    "tool_input": {
+                        "command": (
+                            "cd a && cd b && cd c && cd d "
+                            "&& cat ../../../../checks/test.py"
+                        )
+                    }
+                },
+            )
+
+            self.assertEqual(result.returncode, 2, result.stderr)
+
+    def test_bash_guard_classifies_grep_exclusion_files(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            base = Path(tmp)
+            write_policy(base, implementation_roots=["app"], test_roots=["checks"])
+            (base / "app").mkdir()
+            (base / "checks").mkdir()
+            (base / ".vdd" / "phase").write_text("RED_VERIFIED")
+
+            for command in (
+                "grep -R --exclude-from=checks/patterns SECRET app",
+                "grep -R --exclude-from checks/patterns SECRET app",
+            ):
+                with self.subTest(blocked=command):
+                    result = run_hook(
+                        ".claude/hooks/bash_guard.py",
+                        base,
+                        {"tool_input": {"command": command}},
+                    )
+                    self.assertEqual(result.returncode, 2, result.stderr)
+
+            allowed = run_hook(
+                ".claude/hooks/bash_guard.py",
+                base,
+                {
+                    "tool_input": {
+                        "command": "grep -R --exclude-from=app/ignore SECRET app"
+                    }
+                },
+            )
+            self.assertEqual(allowed.returncode, 0, allowed.stderr)
+
+    def test_bash_guard_keeps_paths_in_ripgrep_no_pattern_modes(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            base = Path(tmp)
+            write_policy(base, implementation_roots=["app"], test_roots=["checks"])
+            (base / "app").mkdir()
+            (base / "checks").mkdir()
+            (base / ".vdd" / "phase").write_text("RED_VERIFIED")
+
+            # --files 沒有 pattern operand，app 是路徑而不是 pattern
+            allowed = run_hook(
+                ".claude/hooks/bash_guard.py",
+                base,
+                {"tool_input": {"command": "rg --files app"}},
+            )
+            blocked = run_hook(
+                ".claude/hooks/bash_guard.py",
+                base,
+                {"tool_input": {"command": "rg --files checks"}},
+            )
+
+            self.assertEqual(allowed.returncode, 0, allowed.stderr)
+            self.assertEqual(blocked.returncode, 2, blocked.stderr)
+
     def test_setup_protocol_documents_the_read_side_guard(self):
         protocol = (ROOT / "setup" / "AGENT_SETUP_PROTOCOL.md").read_text()
 
