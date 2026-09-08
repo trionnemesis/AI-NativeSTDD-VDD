@@ -79,25 +79,66 @@ def split_tokens(segment):
 PATTERN_FIRST_READERS = frozenset({"grep", "rg", "ag", "sed", "awk"})
 # 不給路徑時遞迴搜尋 cwd，因此「沒有 operand」本身就是一個 scope。
 SEARCH_READERS = frozenset({"grep", "rg", "ag"})
-# 短選項可以黏著值（-ePATTERN、-fFILE），也可以吃下一個 token。
-VALUE_SHORT_OPTIONS = "efmgt"
-PATTERN_SHORT_OPTIONS = "ef"
-FILE_SHORT_OPTIONS = "f"
+# 選項 arity 必須逐命令定義：cat -e／-t 是顯示旗標，套用 grep 的 arity 會把
+# 檔案 operand 當成選項值吃掉。少宣告只會多出幾個 other 分類的 operand（無害），
+# 多宣告會吃掉真正的路徑（有害），因此只為確實吃值的 reader 宣告。
+READER_OPTIONS = {
+    "grep": {"value": "efm", "pattern": "ef", "file": "f"},
+    "rg": {"value": "efmgt", "pattern": "ef", "file": "f"},
+    "ag": {"value": "efm", "pattern": "ef", "file": "f"},
+    "sed": {"value": "ef", "pattern": "ef", "file": "f"},
+    "awk": {"value": "fv", "pattern": "f", "file": "f"},
+}
+NO_VALUE_OPTIONS = {"value": "", "pattern": "", "file": ""}
 PATTERN_LONG_OPTIONS = frozenset({"--regexp", "--file", "--expression"})
 FILE_LONG_OPTIONS = frozenset({"--file"})
 VALUE_LONG_OPTIONS = PATTERN_LONG_OPTIONS | frozenset(
     {"--max-count", "--include", "--exclude", "--glob", "--type"}
 )
+# 分組語法與 command prefix 必須先剝掉，否則 (cat x 的命令名會是 "(cat"。
+COMMAND_PREFIXES = frozenset(
+    {"command", "builtin", "exec", "env", "time", "nohup", "nice", "sudo", "then", "do", "else"}
+)
+GROUPING_CHARACTERS = "({!"
+# 附著式輸入重導向：<file、0<file。<< 是 heredoc，其後是分隔字串不是路徑。
+INPUT_REDIRECTION = re.compile(r"^(\d*)<(?![<&])(.*)$")
 
 
 def segment_command(tokens):
-    """跳過前置 env assignment，回傳 (command_name, remaining_tokens)。"""
+    """剝掉 env assignment、分組語法與 command prefix，回傳 (name, remaining)。"""
     index = 0
-    while index < len(tokens) and "=" in tokens[index] and not tokens[index].startswith("-"):
+    while index < len(tokens):
+        token = tokens[index].lstrip(GROUPING_CHARACTERS)
+        if not token:
+            index += 1
+            continue
+        if "=" in token and not token.startswith("-"):
+            index += 1
+            continue
+        name = PurePosixPath(token).name
+        if name in COMMAND_PREFIXES:
+            index += 1
+            continue
+        return name, tokens[index + 1:]
+    return None, []
+
+
+def redirection_targets(tokens):
+    """取出附著式輸入重導向的檔案；重導向讓任何命令都變成 reader。"""
+    targets = []
+    index = 0
+    while index < len(tokens):
+        match = INPUT_REDIRECTION.match(tokens[index])
         index += 1
-    if index >= len(tokens):
-        return None, []
-    return PurePosixPath(tokens[index]).name, tokens[index + 1:]
+        if match is None:
+            continue
+        attached = match.group(2)
+        if attached:
+            targets.append(attached)
+        elif index < len(tokens):
+            targets.append(tokens[index])
+            index += 1
+    return targets
 
 
 def _long_option(token, tokens, index):
@@ -111,7 +152,7 @@ def _long_option(token, tokens, index):
     return supplied, value if option in FILE_LONG_OPTIONS else None, index
 
 
-def _short_options(token, tokens, index):
+def _short_options(token, tokens, index, options):
     """處理短選項叢集；值可能黏在同一個 token 上（-ePATTERN）或落在下一個 token。"""
     supplied = False
     file_value = None
@@ -120,9 +161,9 @@ def _short_options(token, tokens, index):
     while position < len(letters):
         letter = letters[position]
         position += 1
-        if letter not in VALUE_SHORT_OPTIONS:
+        if letter not in options["value"]:
             continue
-        supplied = supplied or letter in PATTERN_SHORT_OPTIONS
+        supplied = supplied or letter in options["pattern"]
         attached = letters[position:]
         if attached:
             value = attached
@@ -131,7 +172,7 @@ def _short_options(token, tokens, index):
             index += 1
         else:
             value = None
-        if letter in FILE_SHORT_OPTIONS:
+        if letter in options["file"]:
             file_value = value
         break
     return supplied, file_value, index
@@ -142,6 +183,7 @@ def path_operands(name, tokens):
 
     -f／--file 的值本身就是要被讀取的 pattern 檔，因此同時計入 read target。
     """
+    options = READER_OPTIONS.get(name, NO_VALUE_OPTIONS)
     operands = []
     file_values = []
     pattern_supplied = False
@@ -152,12 +194,16 @@ def path_operands(name, tokens):
         if token == "--":
             operands.extend(item for item in tokens[index:] if item)
             break
+        if INPUT_REDIRECTION.match(token):
+            continue  # 重導向由 redirection_targets 單獨處理
         if not token.startswith("-") or token == "-":
             if token:
                 operands.append(token)
             continue
-        handler = _long_option if token.startswith("--") else _short_options
-        supplied, file_value, index = handler(token, tokens, index)
+        if token.startswith("--"):
+            supplied, file_value, index = _long_option(token, tokens, index)
+        else:
+            supplied, file_value, index = _short_options(token, tokens, index, options)
         pattern_supplied = pattern_supplied or supplied
         if file_value:
             file_values.append(file_value)
@@ -180,16 +226,16 @@ def read_targets(shell_command, root):
         name, tokens = segment_command(split_tokens(segment))
         if name is None:
             continue
+        # 輸入重導向讓任何命令都讀得到檔案，與命令是不是 reader 無關。
+        arguments = redirection_targets(tokens)
         if name in CD_COMMANDS:
-            arguments = path_operands(name, tokens)
-            opaque = not arguments or arguments[0] == "-" or any(
-                character in arguments[0] for character in OPAQUE_CD_ARGUMENT
+            destinations = path_operands(name, tokens)
+            opaque = not destinations or destinations[0] == "-" or any(
+                character in destinations[0] for character in OPAQUE_CD_ARGUMENT
             )
-            cwd = root if opaque else cwd / arguments[0]
-            continue
-        if name not in READ_COMMANDS:
-            continue
-        arguments = path_operands(name, tokens)
+            cwd = root if opaque else cwd / destinations[0]
+        elif name in READ_COMMANDS:
+            arguments += path_operands(name, tokens)
         if not arguments and name in SEARCH_READERS:
             # rg／grep 不帶路徑時遞迴搜尋 cwd，那就是這次搜尋的 scope。
             arguments = ["."]

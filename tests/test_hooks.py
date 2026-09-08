@@ -1225,6 +1225,86 @@ class HookTests(unittest.TestCase):
             )
             self.assertEqual(reversed_lane.returncode, 2, reversed_lane.stderr)
 
+    def test_bash_guard_uses_per_command_option_arity(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            base = Path(tmp)
+            write_policy(base, implementation_roots=["app"], test_roots=["checks"])
+            (base / "app").mkdir()
+            (base / "checks").mkdir()
+            (base / ".vdd" / "phase").write_text("RED_VERIFIED")
+
+            # cat -e／-t 是顯示旗標；套用 grep 的 arity 會把檔案 operand 當值吃掉
+            for command in ("cat -e checks/test_a.py", "cat -t checks/test_a.py"):
+                with self.subTest(blocked=command):
+                    result = run_hook(
+                        ".claude/hooks/bash_guard.py",
+                        base,
+                        {"tool_input": {"command": command}},
+                    )
+                    self.assertEqual(result.returncode, 2, result.stderr)
+
+            for command in ("cat -e app/login.py", "head -n 20 app/login.py"):
+                with self.subTest(allowed=command):
+                    result = run_hook(
+                        ".claude/hooks/bash_guard.py",
+                        base,
+                        {"tool_input": {"command": command}},
+                    )
+                    self.assertEqual(result.returncode, 0, result.stderr)
+
+    def test_bash_guard_unwraps_grouping_and_command_prefixes(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            base = Path(tmp)
+            write_policy(base, implementation_roots=["app"], test_roots=["checks"])
+            (base / "app").mkdir()
+            (base / "checks").mkdir()
+            (base / ".vdd" / "phase").write_text("RED_VERIFIED")
+
+            for command in (
+                "(cat checks/test_a.py)",
+                "{ cat checks/test_a.py; }",
+                "command cat checks/test_a.py",
+                "sudo cat checks/test_a.py",
+            ):
+                with self.subTest(command=command):
+                    result = run_hook(
+                        ".claude/hooks/bash_guard.py",
+                        base,
+                        {"tool_input": {"command": command}},
+                    )
+                    self.assertEqual(result.returncode, 2, result.stderr)
+
+    def test_bash_guard_reads_input_redirection_targets(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            base = Path(tmp)
+            write_policy(base, implementation_roots=["app"], test_roots=["checks"])
+            (base / "app").mkdir()
+            (base / "checks").mkdir()
+            (base / ".vdd" / "phase").write_text("RED_VERIFIED")
+
+            for command in (
+                "cat <checks/test_a.py",
+                "cat < checks/test_a.py",
+                "cat 0<checks/test_a.py",
+                "grep SECRET <checks/test_a.py",
+                # 重導向讓任何命令都變成 reader，不限 READ_COMMANDS
+                "wc -l <checks/test_a.py",
+            ):
+                with self.subTest(blocked=command):
+                    result = run_hook(
+                        ".claude/hooks/bash_guard.py",
+                        base,
+                        {"tool_input": {"command": command}},
+                    )
+                    self.assertEqual(result.returncode, 2, result.stderr)
+
+            allowed = run_hook(
+                ".claude/hooks/bash_guard.py",
+                base,
+                {"tool_input": {"command": "cat <app/login.py"}},
+            )
+            self.assertEqual(allowed.returncode, 0, allowed.stderr)
+
     def test_setup_protocol_documents_the_read_side_guard(self):
         protocol = (ROOT / "setup" / "AGENT_SETUP_PROTOCOL.md").read_text()
 
