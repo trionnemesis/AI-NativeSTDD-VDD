@@ -170,7 +170,13 @@ elif [ ! -f "$TARGET/.claude/settings.json" ] && [ -f "$SCRIPT_DIR/.claude/setti
   cp "$SCRIPT_DIR/.claude/settings.json" "$TARGET/.claude/settings.json"
   echo "  Copied settings.json"
 elif [ -f "$TARGET/.claude/settings.json" ]; then
-  echo "  settings.json 已存在，跳過"
+  # 既有安裝：只補上缺少的 matcher／hook command，不覆寫既有設定。
+  # 少了這一步，升級時複製進來的新 entrypoint 永遠不會被呼叫。
+  if ! python3 "$SCRIPT_DIR/setup/merge_settings.py" \
+    "$TARGET/.claude/settings.json" "$SCRIPT_DIR/.claude/settings.json"; then
+    echo "  ERROR: 無法合併 settings.json，請手動比對 hook registration" >&2
+    exit 1
+  fi
 fi
 echo "[P3] 完成"
 

@@ -28,9 +28,20 @@ DEFAULT_POLICY: dict[str, Any] = {
 }
 PATH_TEMPLATE_FIELDS = {"module", "relative", "path"}
 
-# 只有這些 phase 代表「實作已被允許」；read-side 與 write-side 必須共用同一定義，
-# 否則兩側會各自漂移成不同的 isolation 語意。
+# write-side：這些 phase 允許寫實作。
 IMPLEMENTATION_PHASES = ("RED_VERIFIED", "GREEN")
+
+# read-side lane。只有 RED_VERIFIED 能斷定「現在在實作側」。
+# GREEN 是 cycle 結束狀態，不是下一個任務的 lane：green_gate 寫入 GREEN 之後，
+# 沒有任何 task boundary 會把它復位，把 GREEN 當實作側會讓後續每個任務的
+# test author 讀不到既有測試、卻讀得到實作——正好是反過來的隔離。
+READ_LANE_BY_PHASE = {"RED_VERIFIED": "implementation", "GREEN": "cycle_complete"}
+DEFAULT_READ_LANE = "test_authoring"
+FORBIDDEN_SIDE_BY_LANE = {
+    "implementation": "test",
+    "test_authoring": "implementation",
+    "cycle_complete": None,
+}
 
 
 class PolicyError(ValueError):
@@ -188,6 +199,34 @@ def load_policy(path: Path | None = None) -> dict[str, Any]:
         policy["test_roots"], "test_roots", paths=True
     )
     return policy
+
+
+def read_lane(phase: str | None) -> str:
+    """Return the read-side lane implied by the governance phase."""
+    return READ_LANE_BY_PHASE.get(phase, DEFAULT_READ_LANE)
+
+
+def forbidden_side(phase: str | None) -> str | None:
+    """Return which side must not be read in this phase, or None."""
+    return FORBIDDEN_SIDE_BY_LANE[read_lane(phase)]
+
+
+def classify_path(raw_path: str, policy: dict[str, Any]) -> str:
+    """Classify a path as spec / test / implementation / other.
+
+    Order is precedence. Only paths inside configured roots are classified;
+    outside them the answer is always "other" because the setup protocol forbids
+    guessing layout from framework heuristics — otherwise a document such as
+    docs/02-canonical-spec.md would be treated as a test by the *spec* pattern.
+    """
+    if path_in_roots(raw_path, policy["protected_spec_roots"]):
+        return "spec"
+    if path_in_roots(raw_path, policy["test_roots"]):
+        return "test"
+    if path_in_roots(raw_path, policy["implementation_roots"]):
+        # Co-located tests such as app/login.spec.ts still belong to the test side.
+        return "test" if matches_test_path(raw_path, policy) else "implementation"
+    return "other"
 
 
 def read_phase(root: Path | None = None) -> str | None:

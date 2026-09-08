@@ -685,6 +685,145 @@ class HookTests(unittest.TestCase):
             )
             self.assertEqual(allowed.returncode, 0, allowed.stderr)
 
+    def test_read_isolation_guard_does_not_lock_a_lane_after_green(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            base = Path(tmp)
+            write_policy(base, implementation_roots=["app"], test_roots=["checks"])
+            (base / ".vdd").mkdir(exist_ok=True)
+            # green_gate 寫入 GREEN 後沒有 task boundary 會復位；把它當實作側，
+            # 會讓下一個任務的 test author 讀不到既有測試卻讀得到實作。
+            (base / ".vdd" / "phase").write_text("GREEN")
+
+            for payload in (
+                {"tool_name": "Read", "tool_input": {"file_path": "checks/test_a.py"}},
+                {"tool_name": "Read", "tool_input": {"file_path": "app/login.py"}},
+            ):
+                with self.subTest(payload=payload):
+                    result = run_hook(
+                        ".claude/hooks/read_isolation_guard.py", base, payload
+                    )
+                    self.assertEqual(result.returncode, 0, result.stderr)
+
+    def test_bash_guard_blocks_colocated_tests_and_bare_roots(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            base = Path(tmp)
+            write_policy(base, implementation_roots=["app"], test_roots=["checks"])
+            (base / ".vdd").mkdir(exist_ok=True)
+            (base / ".vdd" / "phase").write_text("RED_VERIFIED")
+
+            for command in (
+                # co-located test：Read hook 會擋，Bash 也必須擋，否則是直接繞道
+                "cat app/login.spec.ts",
+                # 不帶斜線的 root：rg/grep 最常見的遞迴寫法
+                "rg assert checks",
+                "grep -R assert checks",
+                "sed -n '1,5p' checks/test_a.py",
+            ):
+                with self.subTest(command=command):
+                    result = run_hook(
+                        ".claude/hooks/bash_guard.py",
+                        base,
+                        {"tool_input": {"command": command}},
+                    )
+                    self.assertEqual(result.returncode, 2, result.stderr)
+
+            for command in (
+                "cat app/login.py",
+                # 執行測試是實作側取得回饋的正當管道，不得被當成讀取測試原始碼
+                "python3 -m pytest checks -q",
+            ):
+                with self.subTest(command=command):
+                    result = run_hook(
+                        ".claude/hooks/bash_guard.py",
+                        base,
+                        {"tool_input": {"command": command}},
+                    )
+                    self.assertEqual(result.returncode, 0, result.stderr)
+
+    def test_bash_guard_applies_no_read_isolation_after_green(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            base = Path(tmp)
+            write_policy(base, implementation_roots=["app"], test_roots=["checks"])
+            (base / ".vdd").mkdir(exist_ok=True)
+            (base / ".vdd" / "phase").write_text("GREEN")
+
+            for command in ("cat checks/test_a.py", "cat app/login.py"):
+                with self.subTest(command=command):
+                    result = run_hook(
+                        ".claude/hooks/bash_guard.py",
+                        base,
+                        {"tool_input": {"command": command}},
+                    )
+                    self.assertEqual(result.returncode, 0, result.stderr)
+
+    def test_init_merges_missing_hook_registration_into_existing_settings(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            target = Path(tmp) / "existing"
+            (target / ".claude").mkdir(parents=True)
+            settings_path = target / ".claude" / "settings.json"
+            settings_path.write_text(
+                json.dumps(
+                    {
+                        "hooks": {
+                            "PreToolUse": [
+                                {
+                                    "matcher": "Edit|Write",
+                                    "hooks": [
+                                        {
+                                            "type": "command",
+                                            "command": "python3 pre_impl_gate.py",
+                                        }
+                                    ],
+                                }
+                            ]
+                        },
+                        "projectLocalKey": "keep me",
+                    }
+                )
+            )
+
+            merged = subprocess.run(
+                [
+                    sys.executable,
+                    str(ROOT / "setup" / "merge_settings.py"),
+                    str(settings_path),
+                    str(ROOT / ".claude" / "settings.json"),
+                ],
+                capture_output=True,
+                text=True,
+                check=False,
+            )
+            settings = json.loads(settings_path.read_text())
+            entries = settings["hooks"]["PreToolUse"]
+
+            self.assertEqual(merged.returncode, 0, merged.stderr)
+            self.assertEqual(settings["projectLocalKey"], "keep me")
+            self.assertTrue(
+                any(entry.get("matcher") == "Read|Grep|Glob" for entry in entries),
+                entries,
+            )
+            # 既有 matcher 只補缺少的 command，不覆寫既有註冊
+            edit_entry = next(
+                entry for entry in entries if entry.get("matcher") == "Edit|Write"
+            )
+            self.assertIn(
+                "python3 pre_impl_gate.py",
+                [hook["command"] for hook in edit_entry["hooks"]],
+            )
+
+            repeated = subprocess.run(
+                [
+                    sys.executable,
+                    str(ROOT / "setup" / "merge_settings.py"),
+                    str(settings_path),
+                    str(ROOT / ".claude" / "settings.json"),
+                ],
+                capture_output=True,
+                text=True,
+                check=False,
+            )
+            self.assertIn("merged 0 missing", repeated.stdout)
+
     def test_setup_protocol_documents_the_read_side_guard(self):
         protocol = (ROOT / "setup" / "AGENT_SETUP_PROTOCOL.md").read_text()
 

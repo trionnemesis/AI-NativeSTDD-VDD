@@ -73,10 +73,20 @@ confirm_mode_checklist:
 
 | phase | lane | 不可讀 |
 |---|---|---|
-| `RED_VERIFIED`、`GREEN` | implementation | configured `test_roots` 與符合 `test_file_patterns` 的檔案 |
+| `RED_VERIFIED` | implementation | configured `test_roots`，以及實作側命中 `test_file_patterns` 者 |
+| `GREEN` | cycle_complete | （不施加 read isolation） |
 | 其他（含 `INIT` 與檔案不存在） | test_authoring | configured `implementation_roots` |
 
 `protected_spec_roots` 兩側都可讀——Canonical Spec 是雙方共同的約束來源。
+
+`GREEN` 不是 lane，是 cycle 結束狀態。`green_gate` 寫入 `GREEN` 後沒有任何
+task boundary 會把它復位，因此不得把它當成下一個任務的實作側——否則後續每個
+任務的 test author 都會讀不到既有測試、卻讀得到實作，正好是反過來的隔離。
+read isolation 由下一輪 RED 驗證（phase 轉回 `RED_VERIFIED`）重新武裝。
+
+**已知缺口**：同一個任務週期結束後、下一輪 RED 驗證之前，phase 停在 `GREEN`，
+這段期間沒有 read isolation。補上 task-boundary 的 phase 復位會同時改變
+`GATE:RED` 的寫入語意，屬於 governance 決策，不在 hook 層自行決定。
 
 **任何項目 FAIL → 進入 Configure Mode 執行對應 Phase**
 
