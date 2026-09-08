@@ -28,6 +28,21 @@ DEFAULT_POLICY: dict[str, Any] = {
 }
 PATH_TEMPLATE_FIELDS = {"module", "relative", "path"}
 
+# write-side：這些 phase 允許寫實作。
+IMPLEMENTATION_PHASES = ("RED_VERIFIED", "GREEN")
+
+# read-side lane。只有 RED_VERIFIED 能斷定「現在在實作側」。
+# GREEN 是 cycle 結束狀態，不是下一個任務的 lane：green_gate 寫入 GREEN 之後，
+# 沒有任何 task boundary 會把它復位，把 GREEN 當實作側會讓後續每個任務的
+# test author 讀不到既有測試、卻讀得到實作——正好是反過來的隔離。
+READ_LANE_BY_PHASE = {"RED_VERIFIED": "implementation", "GREEN": "cycle_complete"}
+DEFAULT_READ_LANE = "test_authoring"
+FORBIDDEN_SIDE_BY_LANE = {
+    "implementation": "test",
+    "test_authoring": "implementation",
+    "cycle_complete": None,
+}
+
 
 class PolicyError(ValueError):
     """Raised when the local path policy cannot be enforced safely."""
@@ -183,7 +198,144 @@ def load_policy(path: Path | None = None) -> dict[str, Any]:
     policy["test_roots"] = _validate_string_list(
         policy["test_roots"], "test_roots", paths=True
     )
+    _reject_ambiguous_roots(policy)
     return policy
+
+
+def _reject_ambiguous_roots(policy: dict[str, Any]) -> None:
+    """Reject a root declared in more than one classification category.
+
+    Nesting is a legitimate layout and is resolved by longest match, but exact
+    equality has no correct reading: classify_path would have to pick a side, and
+    silently picking one exposes the other. Fail loudly instead.
+    """
+    categories = (
+        ("protected_spec_roots", policy["protected_spec_roots"]),
+        ("test_roots", policy["test_roots"]),
+        ("implementation_roots", policy["implementation_roots"]),
+    )
+    seen: dict[str, str] = {}
+    for label, roots in categories:
+        for root in roots:
+            previous = seen.get(root)
+            if previous is not None:
+                raise PolicyError(
+                    f"{root!r} is declared in both {previous} and {label}; "
+                    "a root must belong to exactly one category"
+                )
+            seen[root] = label
+
+
+COLOCATED_SCAN_LIMIT = 5000
+
+
+def forbidden_roots(policy: dict[str, Any], forbidden: str) -> list[str]:
+    """The configured roots belonging to the isolated side."""
+    if forbidden == "test":
+        return list(policy["test_roots"])
+    return list(policy["implementation_roots"])
+
+
+def isolated_side_exists(
+    policy: dict[str, Any], forbidden: str, root: Path | None = None
+) -> bool:
+    """Whether the isolated side actually exists in this repository.
+
+    When it does not, nothing can be reached and the guards stay inert — otherwise
+    this governance repository, which has no src/, would block its own searches.
+    """
+    base = root or project_root()
+    if any((base / candidate).is_dir() for candidate in forbidden_roots(policy, forbidden)):
+        return True
+    if forbidden != "test":
+        return False
+    # test_roots 不存在不代表沒有測試：co-located layout 的測試就住在 implementation
+    # roots 底下。掃描設上限，掃不完時回報「存在」——寧可留著 guard，也不要靜默停用。
+    scanned = 0
+    for candidate in policy["implementation_roots"]:
+        directory = base / candidate
+        if not directory.is_dir():
+            continue
+        for path in directory.rglob("*"):
+            scanned += 1
+            if scanned > COLOCATED_SCAN_LIMIT:
+                return True
+            if path.is_file() and matches_test_path(str(path), policy):
+                return True
+    return False
+
+
+def scope_reaches_forbidden(
+    raw_path: str, policy: dict[str, Any], forbidden: str
+) -> bool:
+    """Whether a search scope contains (rather than sits inside) an isolated root.
+
+    `path: "."` classifies as "other" yet traverses the whole repository, so a
+    containment check is required on top of classify_path.
+    """
+    relative = repo_relative_path(raw_path)
+    if relative is None:
+        return False
+    normalized = "" if relative in (".", "") else relative
+    if not normalized:
+        return True
+    return any(
+        root == normalized or root.startswith(f"{normalized}/")
+        for root in forbidden_roots(policy, forbidden)
+    )
+
+
+def read_lane(phase: str | None) -> str:
+    """Return the read-side lane implied by the governance phase."""
+    return READ_LANE_BY_PHASE.get(phase, DEFAULT_READ_LANE)
+
+
+def forbidden_side(phase: str | None) -> str | None:
+    """Return which side must not be read in this phase, or None."""
+    return FORBIDDEN_SIDE_BY_LANE[read_lane(phase)]
+
+
+def classify_path(raw_path: str, policy: dict[str, Any]) -> str:
+    """Classify a path as spec / test / implementation / other.
+
+    Order is precedence. Only paths inside configured roots are classified;
+    outside them the answer is always "other" because the setup protocol forbids
+    guessing layout from framework heuristics — otherwise a document such as
+    docs/02-canonical-spec.md would be treated as a test by the *spec* pattern.
+    """
+    relative = repo_relative_path(raw_path)
+    if relative is None:
+        return "other"
+    # Longest matching root wins. Fixed category precedence would let a policy such as
+    # protected_spec_roots=["project"] with implementation_roots=["project/src"] classify
+    # every implementation file as always-readable spec.
+    best_kind: str | None = None
+    best_length = -1
+    for kind, roots in (
+        ("spec", policy["protected_spec_roots"]),
+        ("test", policy["test_roots"]),
+        ("implementation", policy["implementation_roots"]),
+    ):
+        for root in roots:
+            if relative != root and not relative.startswith(f"{root}/"):
+                continue
+            if len(root) > best_length:
+                best_kind, best_length = kind, len(root)
+    if best_kind == "implementation":
+        # Co-located tests such as app/login.spec.ts still belong to the test side.
+        return "test" if matches_test_path(raw_path, policy) else "implementation"
+    return best_kind or "other"
+
+
+def read_phase(root: Path | None = None) -> str | None:
+    """Return the governance phase, or None when the state file is absent."""
+    phase_file = (root or project_root()) / ".vdd" / "phase"
+    try:
+        if not phase_file.exists():
+            return None
+        return phase_file.read_text(encoding="utf-8").strip()
+    except (OSError, UnicodeError) as exc:
+        raise PolicyError(f"cannot read the governance phase: {exc}") from exc
 
 
 def repo_relative_path(raw_path: str, root: Path | None = None) -> str | None:

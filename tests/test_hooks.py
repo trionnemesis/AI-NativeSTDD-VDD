@@ -514,6 +514,1768 @@ class HookTests(unittest.TestCase):
             self.assertIn("started", captured.tail)
             self.assertLess(time.monotonic() - started, 30)
 
+    def test_read_isolation_guard_is_registered_for_read_tools(self):
+        settings = json.loads((ROOT / ".claude" / "settings.json").read_text())
+        entries = settings["hooks"]["PreToolUse"]
+
+        matched = [
+            entry
+            for entry in entries
+            if entry.get("matcher") == "Read|Grep|Glob"
+            and any(
+                "read_isolation_guard.py" in hook["command"] for hook in entry["hooks"]
+            )
+        ]
+
+        self.assertEqual(len(matched), 1, entries)
+
+    def test_read_isolation_guard_blocks_tests_during_implementation(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            base = Path(tmp)
+            write_policy(base, implementation_roots=["app"], test_roots=["checks"])
+            (base / ".vdd").mkdir(exist_ok=True)
+            (base / ".vdd" / "phase").write_text("RED_VERIFIED")
+
+            for payload in (
+                {"tool_name": "Read", "tool_input": {"file_path": "checks/test_a.py"}},
+                {"tool_name": "Grep", "tool_input": {"path": "checks"}},
+                {"tool_name": "Glob", "tool_input": {"pattern": "checks/**/*.py"}},
+                {"tool_name": "Read", "tool_input": {"file_path": "app/login.spec.ts"}},
+            ):
+                with self.subTest(payload=payload):
+                    result = run_hook(
+                        ".claude/hooks/read_isolation_guard.py", base, payload
+                    )
+                    self.assertEqual(result.returncode, 2, result.stderr)
+                    self.assertIn("agent_isolation_enforced", result.stderr)
+                    self.assertIn("lane=implementation", result.stderr)
+
+            # 實作側自己的檔案、Canonical Spec 與非測試路徑都必須維持可讀。
+            # 已知 over-match：實作側檔名含 test／spec 者會被預設 pattern 判為測試，
+            # 解法是收窄 test_file_patterns，見
+            # test_read_isolation_guard_honours_narrowed_test_file_patterns。
+            for payload in (
+                {"tool_name": "Read", "tool_input": {"file_path": "app/login.py"}},
+                {
+                    "tool_name": "Read",
+                    "tool_input": {"file_path": "specs/features/login.feature"},
+                },
+                {"tool_name": "Read", "tool_input": {"file_path": "README.md"}},
+                # configured roots 之外不猜：檔名含 spec 的文件不得被當成測試擋掉。
+                {
+                    "tool_name": "Read",
+                    "tool_input": {"file_path": "docs/02-canonical-spec.md"},
+                },
+            ):
+                with self.subTest(payload=payload):
+                    result = run_hook(
+                        ".claude/hooks/read_isolation_guard.py", base, payload
+                    )
+                    self.assertEqual(result.returncode, 0, result.stderr)
+
+    def test_read_isolation_guard_honours_narrowed_test_file_patterns(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            base = Path(tmp)
+            write_policy(
+                base,
+                implementation_roots=["app"],
+                test_roots=["checks"],
+                test_file_patterns=["*.spec.ts"],
+            )
+            (base / ".vdd").mkdir(exist_ok=True)
+            (base / ".vdd" / "phase").write_text("RED_VERIFIED")
+
+            # 預設 *test* pattern 會把這支實作誤判成測試；收窄 policy 是既有的解法。
+            allowed = run_hook(
+                ".claude/hooks/read_isolation_guard.py",
+                base,
+                {"tool_name": "Read", "tool_input": {"file_path": "app/testing.py"}},
+            )
+            blocked = run_hook(
+                ".claude/hooks/read_isolation_guard.py",
+                base,
+                {"tool_name": "Read", "tool_input": {"file_path": "app/login.spec.ts"}},
+            )
+
+            self.assertEqual(allowed.returncode, 0, allowed.stderr)
+            self.assertEqual(blocked.returncode, 2, blocked.stderr)
+
+    def test_read_isolation_guard_blocks_implementation_during_test_authoring(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            base = Path(tmp)
+            write_policy(base, implementation_roots=["app"], test_roots=["checks"])
+            (base / ".vdd").mkdir(exist_ok=True)
+            (base / ".vdd" / "phase").write_text("INIT")
+
+            blocked = run_hook(
+                ".claude/hooks/read_isolation_guard.py",
+                base,
+                {"tool_name": "Read", "tool_input": {"file_path": "app/login.py"}},
+            )
+            self.assertEqual(blocked.returncode, 2, blocked.stderr)
+            self.assertIn("lane=test_authoring", blocked.stderr)
+
+            # 這一側必須讀得到測試與 spec，否則寫不出測試。
+            for payload in (
+                {"tool_name": "Read", "tool_input": {"file_path": "checks/test_a.py"}},
+                {
+                    "tool_name": "Read",
+                    "tool_input": {"file_path": "specs/features/login.feature"},
+                },
+            ):
+                with self.subTest(payload=payload):
+                    result = run_hook(
+                        ".claude/hooks/read_isolation_guard.py", base, payload
+                    )
+                    self.assertEqual(result.returncode, 0, result.stderr)
+
+    def test_read_isolation_guard_defaults_to_test_authoring_without_phase(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            base = Path(tmp)
+            write_policy(base, implementation_roots=["app"], test_roots=["checks"])
+
+            result = run_hook(
+                ".claude/hooks/read_isolation_guard.py",
+                base,
+                {"tool_name": "Read", "tool_input": {"file_path": "app/login.py"}},
+            )
+
+            self.assertEqual(result.returncode, 2, result.stderr)
+            self.assertIn("lane=test_authoring", result.stderr)
+
+    def test_bash_guard_blocks_reading_the_isolated_side(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            base = Path(tmp)
+            write_policy(base, implementation_roots=["app"], test_roots=["checks"])
+            (base / "app").mkdir()
+            (base / "checks").mkdir()
+            (base / ".vdd").mkdir(exist_ok=True)
+            phase = base / ".vdd" / "phase"
+
+            phase.write_text("RED_VERIFIED")
+            for command in (
+                "cat checks/test_a.py",
+                "head -n 20 checks/test_a.py",
+                "sed -n '1,5p' checks/test_a.py",
+                "grep -rn assert checks/",
+            ):
+                with self.subTest(phase="RED_VERIFIED", command=command):
+                    result = run_hook(
+                        ".claude/hooks/bash_guard.py",
+                        base,
+                        {"tool_input": {"command": command}},
+                    )
+                    self.assertEqual(result.returncode, 2, result.stderr)
+            allowed = run_hook(
+                ".claude/hooks/bash_guard.py",
+                base,
+                {"tool_input": {"command": "cat app/login.py"}},
+            )
+            self.assertEqual(allowed.returncode, 0, allowed.stderr)
+
+            phase.write_text("INIT")
+            blocked = run_hook(
+                ".claude/hooks/bash_guard.py",
+                base,
+                {"tool_input": {"command": "cat app/login.py"}},
+            )
+            self.assertEqual(blocked.returncode, 2, blocked.stderr)
+            allowed = run_hook(
+                ".claude/hooks/bash_guard.py",
+                base,
+                {"tool_input": {"command": "cat checks/test_a.py"}},
+            )
+            self.assertEqual(allowed.returncode, 0, allowed.stderr)
+
+    def test_read_isolation_guard_does_not_lock_a_lane_after_green(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            base = Path(tmp)
+            write_policy(base, implementation_roots=["app"], test_roots=["checks"])
+            (base / ".vdd").mkdir(exist_ok=True)
+            # green_gate 寫入 GREEN 後沒有 task boundary 會復位；把它當實作側，
+            # 會讓下一個任務的 test author 讀不到既有測試卻讀得到實作。
+            (base / ".vdd" / "phase").write_text("GREEN")
+
+            for payload in (
+                {"tool_name": "Read", "tool_input": {"file_path": "checks/test_a.py"}},
+                {"tool_name": "Read", "tool_input": {"file_path": "app/login.py"}},
+            ):
+                with self.subTest(payload=payload):
+                    result = run_hook(
+                        ".claude/hooks/read_isolation_guard.py", base, payload
+                    )
+                    self.assertEqual(result.returncode, 0, result.stderr)
+
+    def test_bash_guard_blocks_colocated_tests_and_bare_roots(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            base = Path(tmp)
+            write_policy(base, implementation_roots=["app"], test_roots=["checks"])
+            (base / "app").mkdir()
+            (base / "checks").mkdir()
+            (base / ".vdd").mkdir(exist_ok=True)
+            (base / ".vdd" / "phase").write_text("RED_VERIFIED")
+
+            for command in (
+                # co-located test：Read hook 會擋，Bash 也必須擋，否則是直接繞道
+                "cat app/login.spec.ts",
+                # 不帶斜線的 root：rg/grep 最常見的遞迴寫法
+                "rg assert checks",
+                "grep -R assert checks",
+                "sed -n '1,5p' checks/test_a.py",
+            ):
+                with self.subTest(command=command):
+                    result = run_hook(
+                        ".claude/hooks/bash_guard.py",
+                        base,
+                        {"tool_input": {"command": command}},
+                    )
+                    self.assertEqual(result.returncode, 2, result.stderr)
+
+            for command in (
+                "cat app/login.py",
+                # 執行測試是實作側取得回饋的正當管道，不得被當成讀取測試原始碼
+                "python3 -m pytest checks -q",
+            ):
+                with self.subTest(command=command):
+                    result = run_hook(
+                        ".claude/hooks/bash_guard.py",
+                        base,
+                        {"tool_input": {"command": command}},
+                    )
+                    self.assertEqual(result.returncode, 0, result.stderr)
+
+    def test_bash_guard_applies_no_read_isolation_after_green(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            base = Path(tmp)
+            write_policy(base, implementation_roots=["app"], test_roots=["checks"])
+            (base / "app").mkdir()
+            (base / "checks").mkdir()
+            (base / ".vdd").mkdir(exist_ok=True)
+            (base / ".vdd" / "phase").write_text("GREEN")
+
+            for command in ("cat checks/test_a.py", "cat app/login.py"):
+                with self.subTest(command=command):
+                    result = run_hook(
+                        ".claude/hooks/bash_guard.py",
+                        base,
+                        {"tool_input": {"command": command}},
+                    )
+                    self.assertEqual(result.returncode, 0, result.stderr)
+
+    def test_init_merges_missing_hook_registration_into_existing_settings(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            target = Path(tmp) / "existing"
+            (target / ".claude").mkdir(parents=True)
+            settings_path = target / ".claude" / "settings.json"
+            settings_path.write_text(
+                json.dumps(
+                    {
+                        "hooks": {
+                            "PreToolUse": [
+                                {
+                                    "matcher": "Edit|Write",
+                                    "hooks": [
+                                        {
+                                            "type": "command",
+                                            "command": "python3 pre_impl_gate.py",
+                                        }
+                                    ],
+                                }
+                            ]
+                        },
+                        "projectLocalKey": "keep me",
+                    }
+                )
+            )
+
+            merged = subprocess.run(
+                [
+                    sys.executable,
+                    str(ROOT / "setup" / "merge_settings.py"),
+                    str(settings_path),
+                    str(ROOT / ".claude" / "settings.json"),
+                ],
+                capture_output=True,
+                text=True,
+                check=False,
+            )
+            settings = json.loads(settings_path.read_text())
+            entries = settings["hooks"]["PreToolUse"]
+
+            self.assertEqual(merged.returncode, 0, merged.stderr)
+            self.assertEqual(settings["projectLocalKey"], "keep me")
+            self.assertTrue(
+                any(entry.get("matcher") == "Read|Grep|Glob" for entry in entries),
+                entries,
+            )
+            # 既有 matcher 只補缺少的 command，不覆寫既有註冊
+            edit_entry = next(
+                entry for entry in entries if entry.get("matcher") == "Edit|Write"
+            )
+            self.assertIn(
+                "python3 pre_impl_gate.py",
+                [hook["command"] for hook in edit_entry["hooks"]],
+            )
+
+            repeated = subprocess.run(
+                [
+                    sys.executable,
+                    str(ROOT / "setup" / "merge_settings.py"),
+                    str(settings_path),
+                    str(ROOT / ".claude" / "settings.json"),
+                ],
+                capture_output=True,
+                text=True,
+                check=False,
+            )
+            self.assertIn("merged 0 missing", repeated.stdout)
+
+    def test_read_isolation_guard_rejects_unanchored_search_scope(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            base = Path(tmp)
+            write_policy(base, implementation_roots=["app"], test_roots=["checks"])
+            (base / "app").mkdir()
+            (base / "checks").mkdir()
+            (base / ".vdd" / "phase").write_text("RED_VERIFIED")
+
+            for payload in (
+                # 遞迴 glob 能穿進 checks/，字面前綴卻是空的
+                {"tool_name": "Glob", "tool_input": {"pattern": "**/checks/**/*.py"}},
+                {"tool_name": "Glob", "tool_input": {"pattern": "**/*.py"}},
+                {"tool_name": "Grep", "tool_input": {"pattern": "assert"}},
+            ):
+                with self.subTest(payload=payload):
+                    result = run_hook(
+                        ".claude/hooks/read_isolation_guard.py", base, payload
+                    )
+                    self.assertEqual(result.returncode, 2, result.stderr)
+                    self.assertIn("未錨定", result.stderr)
+
+            # 以 path= 或字面前綴錨定到非隔離側就放行
+            for payload in (
+                {
+                    "tool_name": "Glob",
+                    "tool_input": {"path": "app", "pattern": "**/*.py"},
+                },
+                {"tool_name": "Glob", "tool_input": {"pattern": "app/**/*.py"}},
+                {"tool_name": "Grep", "tool_input": {"pattern": "assert", "path": "app"}},
+            ):
+                with self.subTest(payload=payload):
+                    result = run_hook(
+                        ".claude/hooks/read_isolation_guard.py", base, payload
+                    )
+                    self.assertEqual(result.returncode, 0, result.stderr)
+
+    def test_read_isolation_guard_skips_anchoring_when_isolated_side_is_absent(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            base = Path(tmp)
+            write_policy(base, implementation_roots=["app"], test_roots=["checks"])
+            (base / ".vdd" / "phase").write_text("RED_VERIFIED")
+
+            # checks/ 不存在 → 沒有東西可穿進去，一般搜尋不該被擋
+            result = run_hook(
+                ".claude/hooks/read_isolation_guard.py",
+                base,
+                {"tool_name": "Grep", "tool_input": {"pattern": "assert"}},
+            )
+
+            self.assertEqual(result.returncode, 0, result.stderr)
+
+    def test_bash_guard_tracks_cd_before_resolving_read_targets(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            base = Path(tmp)
+            write_policy(base, implementation_roots=["app"], test_roots=["checks"])
+            (base / "app").mkdir()
+            (base / "checks").mkdir()
+            (base / ".vdd" / "phase").write_text("RED_VERIFIED")
+
+            for command in (
+                # cd 之後的相對路徑必須以新的 cwd 解析，否則會被判成 repo 外
+                "cd app && cat ../checks/test_a.py",
+                "cat app/../checks/test_a.py",
+                # cd 目的地判不出來時退回 repository root 解析，仍抓得到這種
+                "cd $ELSEWHERE && cat checks/test_a.py",
+            ):
+                with self.subTest(command=command):
+                    result = run_hook(
+                        ".claude/hooks/bash_guard.py",
+                        base,
+                        {"tool_input": {"command": command}},
+                    )
+                    self.assertEqual(result.returncode, 2, result.stderr)
+
+            for command in (
+                "cd app && cat login.py",
+                # 判不出來的 cd 不得讓其後所有 reader 一律誤判為違規：
+                # 這支 guard 也會掃到 heredoc 與引號內的文字。
+                "cd $ELSEWHERE && cat notes.txt",
+            ):
+                with self.subTest(command=command):
+                    allowed = run_hook(
+                        ".claude/hooks/bash_guard.py",
+                        base,
+                        {"tool_input": {"command": command}},
+                    )
+                    self.assertEqual(allowed.returncode, 0, allowed.stderr)
+
+    def test_bash_guard_guards_colocated_tests_without_a_test_root(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            base = Path(tmp)
+            write_policy(base, implementation_roots=["app"], test_roots=["checks"])
+            (base / "app").mkdir()
+            # checks/ 不存在，但 co-located test 存在——隔離側仍然「存在」
+            (base / "app" / "login.spec.ts").write_text("x\n")
+            (base / ".vdd" / "phase").write_text("RED_VERIFIED")
+
+            blocked = run_hook(
+                ".claude/hooks/bash_guard.py",
+                base,
+                {"tool_input": {"command": "cat app/login.spec.ts"}},
+            )
+            allowed = run_hook(
+                ".claude/hooks/bash_guard.py",
+                base,
+                {"tool_input": {"command": "cat app/login.py"}},
+            )
+
+            self.assertEqual(blocked.returncode, 2, blocked.stderr)
+            self.assertEqual(allowed.returncode, 0, allowed.stderr)
+
+    def test_bash_guard_separates_search_patterns_from_paths(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            base = Path(tmp)
+            write_policy(base, implementation_roots=["app"], test_roots=["checks"])
+            (base / "app").mkdir()
+            (base / "checks").mkdir()
+            (base / ".vdd" / "phase").write_text("RED_VERIFIED")
+
+            # grep/rg/sed/awk 的第一個 positional 是 pattern／script，不是路徑
+            for command in ("rg checks app", "grep -e checks -rn app"):
+                with self.subTest(allowed=command):
+                    result = run_hook(
+                        ".claude/hooks/bash_guard.py",
+                        base,
+                        {"tool_input": {"command": command}},
+                    )
+                    self.assertEqual(result.returncode, 0, result.stderr)
+
+            for command in (
+                "rg assert checks",
+                "sed -n 1,5p checks/test_a.py",
+                "awk {print} checks/test_a.py",
+            ):
+                with self.subTest(blocked=command):
+                    result = run_hook(
+                        ".claude/hooks/bash_guard.py",
+                        base,
+                        {"tool_input": {"command": command}},
+                    )
+                    self.assertEqual(result.returncode, 2, result.stderr)
+
+    def test_bash_guard_treats_newlines_as_command_separators(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            base = Path(tmp)
+            write_policy(base, implementation_roots=["app"], test_roots=["checks"])
+            (base / "app").mkdir()
+            (base / "checks").mkdir()
+            (base / ".vdd" / "phase").write_text("RED_VERIFIED")
+
+            for command in (
+                "cd app\ncat ../checks/test_a.py",
+                "echo before\ncat checks/test_a.py",
+            ):
+                with self.subTest(command=command):
+                    result = run_hook(
+                        ".claude/hooks/bash_guard.py",
+                        base,
+                        {"tool_input": {"command": command}},
+                    )
+                    self.assertEqual(result.returncode, 2, result.stderr)
+
+    def test_read_isolation_guard_rejects_scopes_containing_the_isolated_side(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            base = Path(tmp)
+            write_policy(base, implementation_roots=["app"], test_roots=["checks"])
+            (base / "app").mkdir()
+            (base / "checks").mkdir()
+            (base / ".vdd" / "phase").write_text("RED_VERIFIED")
+
+            # path="." 分類是 other，卻涵蓋 checks/
+            for payload in (
+                {
+                    "tool_name": "Glob",
+                    "tool_input": {"path": ".", "pattern": "**/*.py"},
+                },
+                {"tool_name": "Grep", "tool_input": {"pattern": "x", "path": "."}},
+            ):
+                with self.subTest(payload=payload):
+                    result = run_hook(
+                        ".claude/hooks/read_isolation_guard.py", base, payload
+                    )
+                    self.assertEqual(result.returncode, 2, result.stderr)
+                    self.assertIn("未錨定", result.stderr)
+
+            allowed = run_hook(
+                ".claude/hooks/read_isolation_guard.py",
+                base,
+                {"tool_name": "Grep", "tool_input": {"pattern": "x", "path": "app"}},
+            )
+            self.assertEqual(allowed.returncode, 0, allowed.stderr)
+
+    def test_classify_path_uses_the_longest_matching_root(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            base = Path(tmp)
+            write_policy(
+                base,
+                implementation_roots=["project/src"],
+                protected_spec_roots=["project"],
+                test_roots=["checks"],
+            )
+            (base / "project" / "src").mkdir(parents=True)
+            (base / "project" / "src" / "secret.py").write_text("s\n")
+            (base / "project" / "specs").mkdir()
+            (base / "project" / "specs" / "a.feature").write_text("f\n")
+            (base / ".vdd" / "phase").write_text("INIT")
+
+            # implementation_roots 巢狀在 protected_spec_roots 底下時，
+            # 固定的類別優先權會把整個實作側判成永遠可讀的 spec。
+            blocked = run_hook(
+                ".claude/hooks/read_isolation_guard.py",
+                base,
+                {
+                    "tool_name": "Read",
+                    "tool_input": {"file_path": "project/src/secret.py"},
+                },
+            )
+            spec_still_readable = run_hook(
+                ".claude/hooks/read_isolation_guard.py",
+                base,
+                {
+                    "tool_name": "Read",
+                    "tool_input": {"file_path": "project/specs/a.feature"},
+                },
+            )
+
+            self.assertEqual(blocked.returncode, 2, blocked.stderr)
+            self.assertEqual(spec_still_readable.returncode, 0, spec_still_readable.stderr)
+
+    def test_merge_settings_refuses_to_write_through_a_symlink(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            base = Path(tmp)
+            target = base / "target" / ".claude"
+            target.mkdir(parents=True)
+            outside = base / "outside"
+            outside.mkdir()
+            elsewhere = outside / "global-settings.json"
+            elsewhere.write_text(json.dumps({"hooks": {}}))
+            settings_path = target / "settings.json"
+            settings_path.symlink_to(elsewhere)
+
+            result = subprocess.run(
+                [
+                    sys.executable,
+                    str(ROOT / "setup" / "merge_settings.py"),
+                    str(settings_path),
+                    str(ROOT / ".claude" / "settings.json"),
+                ],
+                capture_output=True,
+                text=True,
+                check=False,
+            )
+
+            self.assertEqual(result.returncode, 1, result.stdout)
+            self.assertIn("symlink", result.stderr)
+            # 指向 target 之外的檔案不得被改動
+            self.assertEqual(json.loads(elsewhere.read_text()), {"hooks": {}})
+
+    def test_read_isolation_guard_checks_containment_of_glob_prefixes(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            base = Path(tmp)
+            write_policy(base, implementation_roots=["app"], test_roots=["app/checks"])
+            (base / "app" / "checks").mkdir(parents=True)
+            (base / "app" / "lib").mkdir()
+            (base / "app" / "checks" / "test_a.py").write_text("t\n")
+            (base / ".vdd" / "phase").write_text("RED_VERIFIED")
+
+            # 字面前綴 app 分類是 implementation，但巢狀的 test root 就在它底下
+            blocked = run_hook(
+                ".claude/hooks/read_isolation_guard.py",
+                base,
+                {"tool_name": "Glob", "tool_input": {"pattern": "app/**/*.py"}},
+            )
+            allowed = run_hook(
+                ".claude/hooks/read_isolation_guard.py",
+                base,
+                {"tool_name": "Glob", "tool_input": {"pattern": "app/lib/**/*.py"}},
+            )
+
+            self.assertEqual(blocked.returncode, 2, blocked.stderr)
+            self.assertEqual(allowed.returncode, 0, allowed.stderr)
+
+    def test_read_isolation_guard_skips_scope_checks_when_side_is_absent(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            base = Path(tmp)
+            write_policy(base, implementation_roots=["app"], test_roots=["checks"])
+            (base / "app").mkdir()
+            (base / ".vdd" / "phase").write_text("RED_VERIFIED")
+
+            absent = run_hook(
+                ".claude/hooks/read_isolation_guard.py",
+                base,
+                {"tool_name": "Grep", "tool_input": {"pattern": "x", "path": "."}},
+            )
+            (base / "checks").mkdir()
+            present = run_hook(
+                ".claude/hooks/read_isolation_guard.py",
+                base,
+                {"tool_name": "Grep", "tool_input": {"pattern": "x", "path": "."}},
+            )
+
+            self.assertEqual(absent.returncode, 0, absent.stderr)
+            self.assertEqual(present.returncode, 2, present.stderr)
+
+    def test_policy_rejects_a_root_declared_in_two_categories(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            base = Path(tmp)
+            write_policy(base, implementation_roots=["app"], test_roots=["app"])
+            (base / "app").mkdir()
+            (base / ".vdd" / "phase").write_text("INIT")
+
+            # 巢狀由最長匹配解決，但完全相同的 root 沒有正確解讀方式：
+            # 靜默挑一邊就等於把另一邊放行。
+            result = run_hook(
+                ".claude/hooks/read_isolation_guard.py",
+                base,
+                {"tool_name": "Read", "tool_input": {"file_path": "app/prod.py"}},
+            )
+
+            self.assertEqual(result.returncode, 2, result.stderr)
+            self.assertIn("PATH POLICY", result.stderr)
+            self.assertIn("exactly one category", result.stderr)
+
+    def test_bash_guard_parses_attached_and_file_valued_options(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            base = Path(tmp)
+            write_policy(base, implementation_roots=["app"], test_roots=["checks"])
+            (base / "app").mkdir()
+            (base / "checks").mkdir()
+            (base / ".vdd" / "phase").write_text("RED_VERIFIED")
+
+            for command in (
+                # 黏著值：-eSECRET 未被辨識時 pattern_supplied 為假，
+                # 唯一的路徑 operand 反而被當成 pattern 丟掉
+                "rg -eSECRET checks",
+                "grep -R -eSECRET checks",
+                # -f/--file 的值本身就是要讀的檔案
+                "rg -f checks/patterns app",
+                "awk -f checks/test.awk data",
+                "grep --file=checks/patterns app",
+            ):
+                with self.subTest(blocked=command):
+                    result = run_hook(
+                        ".claude/hooks/bash_guard.py",
+                        base,
+                        {"tool_input": {"command": command}},
+                    )
+                    self.assertEqual(result.returncode, 2, result.stderr)
+
+            for command in ("rg checks app", "grep -e checks -rn app"):
+                with self.subTest(allowed=command):
+                    result = run_hook(
+                        ".claude/hooks/bash_guard.py",
+                        base,
+                        {"tool_input": {"command": command}},
+                    )
+                    self.assertEqual(result.returncode, 0, result.stderr)
+
+    def test_bash_guard_rejects_search_scopes_covering_the_isolated_side(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            base = Path(tmp)
+            write_policy(base, implementation_roots=["app"], test_roots=["checks"])
+            (base / "app").mkdir()
+            (base / "checks").mkdir()
+            phase = base / ".vdd" / "phase"
+            phase.write_text("RED_VERIFIED")
+
+            for command in (
+                "rg SECRET .",
+                # 不帶路徑時遞迴搜尋 cwd，那本身就是涵蓋隔離側的 scope
+                "rg SECRET",
+            ):
+                with self.subTest(phase="RED_VERIFIED", command=command):
+                    result = run_hook(
+                        ".claude/hooks/bash_guard.py",
+                        base,
+                        {"tool_input": {"command": command}},
+                    )
+                    self.assertEqual(result.returncode, 2, result.stderr)
+
+            scoped = run_hook(
+                ".claude/hooks/bash_guard.py",
+                base,
+                {"tool_input": {"command": "rg SECRET app"}},
+            )
+            self.assertEqual(scoped.returncode, 0, scoped.stderr)
+
+            phase.write_text("INIT")
+            reversed_lane = run_hook(
+                ".claude/hooks/bash_guard.py",
+                base,
+                {"tool_input": {"command": "rg SECRET ."}},
+            )
+            self.assertEqual(reversed_lane.returncode, 2, reversed_lane.stderr)
+
+    def test_bash_guard_uses_per_command_option_arity(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            base = Path(tmp)
+            write_policy(base, implementation_roots=["app"], test_roots=["checks"])
+            (base / "app").mkdir()
+            (base / "checks").mkdir()
+            (base / ".vdd" / "phase").write_text("RED_VERIFIED")
+
+            # cat -e／-t 是顯示旗標；套用 grep 的 arity 會把檔案 operand 當值吃掉
+            for command in ("cat -e checks/test_a.py", "cat -t checks/test_a.py"):
+                with self.subTest(blocked=command):
+                    result = run_hook(
+                        ".claude/hooks/bash_guard.py",
+                        base,
+                        {"tool_input": {"command": command}},
+                    )
+                    self.assertEqual(result.returncode, 2, result.stderr)
+
+            for command in ("cat -e app/login.py", "head -n 20 app/login.py"):
+                with self.subTest(allowed=command):
+                    result = run_hook(
+                        ".claude/hooks/bash_guard.py",
+                        base,
+                        {"tool_input": {"command": command}},
+                    )
+                    self.assertEqual(result.returncode, 0, result.stderr)
+
+    def test_bash_guard_unwraps_grouping_and_command_prefixes(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            base = Path(tmp)
+            write_policy(base, implementation_roots=["app"], test_roots=["checks"])
+            (base / "app").mkdir()
+            (base / "checks").mkdir()
+            (base / ".vdd" / "phase").write_text("RED_VERIFIED")
+
+            for command in (
+                "(cat checks/test_a.py)",
+                "{ cat checks/test_a.py; }",
+                "command cat checks/test_a.py",
+                "sudo cat checks/test_a.py",
+            ):
+                with self.subTest(command=command):
+                    result = run_hook(
+                        ".claude/hooks/bash_guard.py",
+                        base,
+                        {"tool_input": {"command": command}},
+                    )
+                    self.assertEqual(result.returncode, 2, result.stderr)
+
+    def test_bash_guard_reads_input_redirection_targets(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            base = Path(tmp)
+            write_policy(base, implementation_roots=["app"], test_roots=["checks"])
+            (base / "app").mkdir()
+            (base / "checks").mkdir()
+            (base / ".vdd" / "phase").write_text("RED_VERIFIED")
+
+            for command in (
+                "cat <checks/test_a.py",
+                "cat < checks/test_a.py",
+                "cat 0<checks/test_a.py",
+                "grep SECRET <checks/test_a.py",
+                # 重導向讓任何命令都變成 reader，不限 READ_COMMANDS
+                "wc -l <checks/test_a.py",
+            ):
+                with self.subTest(blocked=command):
+                    result = run_hook(
+                        ".claude/hooks/bash_guard.py",
+                        base,
+                        {"tool_input": {"command": command}},
+                    )
+                    self.assertEqual(result.returncode, 2, result.stderr)
+
+            allowed = run_hook(
+                ".claude/hooks/bash_guard.py",
+                base,
+                {"tool_input": {"command": "cat <app/login.py"}},
+            )
+            self.assertEqual(allowed.returncode, 0, allowed.stderr)
+
+    def test_bash_guard_handles_shell_forms_that_reach_the_isolated_side(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            base = Path(tmp)
+            write_policy(base, implementation_roots=["app"], test_roots=["checks"])
+            (base / "app").mkdir()
+            (base / "checks").mkdir()
+            (base / ".vdd" / "phase").write_text("RED_VERIFIED")
+
+            for command in (
+                # prefix 自己的選項會變成表面上的命令名
+                "command -p cat checks/test_a.py",
+                "time -p cat checks/test_a.py",
+                "nice -n 10 cat checks/test_a.py",
+                # <> 是讀寫重導向，一樣讀得到
+                "cat <>checks/test_a.py",
+                # cd 失敗時 shell 留在原目錄，|| 分支從 root 執行
+                "cd missing || cat checks/test_a.py",
+                # process substitution 的括號內是另一個完整命令
+                "diff <(cat checks/test_a.py) /dev/null",
+                # 重導向可以出現在命令名之前
+                "<checks/test_a.py cat",
+                "exec <checks/test_a.py; cat",
+            ):
+                with self.subTest(blocked=command):
+                    result = run_hook(
+                        ".claude/hooks/bash_guard.py",
+                        base,
+                        {"tool_input": {"command": command}},
+                    )
+                    self.assertEqual(result.returncode, 2, result.stderr)
+
+            for command in (
+                "cd app && cat login.py",
+                "diff <(cat app/login.py) /dev/null",
+                "nice -n 10 cat app/login.py",
+            ):
+                with self.subTest(allowed=command):
+                    result = run_hook(
+                        ".claude/hooks/bash_guard.py",
+                        base,
+                        {"tool_input": {"command": command}},
+                    )
+                    self.assertEqual(result.returncode, 0, result.stderr)
+
+    def test_bash_guard_limits_implicit_cwd_scope_to_recursive_search(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            base = Path(tmp)
+            write_policy(base, implementation_roots=["app"], test_roots=["checks"])
+            (base / "app").mkdir()
+            (base / "checks").mkdir()
+            (base / ".vdd" / "phase").write_text("RED_VERIFIED")
+
+            # 非遞迴 grep 讀 stdin 而不是 cwd；把管線當成 repo 全域搜尋是誤擋
+            for command in ("printf SECRET | grep SECRET", "echo hi | grep hi"):
+                with self.subTest(allowed=command):
+                    result = run_hook(
+                        ".claude/hooks/bash_guard.py",
+                        base,
+                        {"tool_input": {"command": command}},
+                    )
+                    self.assertEqual(result.returncode, 0, result.stderr)
+
+            for command in ("grep -r SECRET", "rg SECRET"):
+                with self.subTest(blocked=command):
+                    result = run_hook(
+                        ".claude/hooks/bash_guard.py",
+                        base,
+                        {"tool_input": {"command": command}},
+                    )
+                    self.assertEqual(result.returncode, 2, result.stderr)
+
+    def test_bash_guard_unwraps_shell_control_keywords(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            base = Path(tmp)
+            write_policy(base, implementation_roots=["app"], test_roots=["checks"])
+            (base / "app").mkdir()
+            (base / "checks").mkdir()
+            (base / ".vdd" / "phase").write_text("RED_VERIFIED")
+
+            for command in (
+                "if cat checks/secret.py; then :; fi",
+                "while cat checks/secret.py; do :; done",
+                "until cat checks/secret.py; do :; done",
+            ):
+                with self.subTest(command=command):
+                    result = run_hook(
+                        ".claude/hooks/bash_guard.py",
+                        base,
+                        {"tool_input": {"command": command}},
+                    )
+                    self.assertEqual(result.returncode, 2, result.stderr)
+
+    def test_bash_guard_keeps_every_prior_cwd_candidate(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            base = Path(tmp)
+            write_policy(base, implementation_roots=["app"], test_roots=["checks"])
+            (base / "app").mkdir()
+            (base / "checks").mkdir()
+            (base / ".vdd" / "phase").write_text("RED_VERIFIED")
+
+            # 第二個 cd 失敗時 shell 留在 app/，相對路徑要以 app/ 解析才抓得到
+            blocked = run_hook(
+                ".claude/hooks/bash_guard.py",
+                base,
+                {
+                    "tool_input": {
+                        "command": "cd app && cd missing/nested || cat ../checks/secret.py"
+                    }
+                },
+            )
+            allowed = run_hook(
+                ".claude/hooks/bash_guard.py",
+                base,
+                {"tool_input": {"command": "cd app && cat login.py"}},
+            )
+
+            self.assertEqual(blocked.returncode, 2, blocked.stderr)
+            self.assertEqual(allowed.returncode, 0, allowed.stderr)
+
+    def test_bash_guard_keeps_the_all_success_cwd_within_the_cap(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            base = Path(tmp)
+            write_policy(base, implementation_roots=["app"], test_roots=["checks"])
+            (base / "app").mkdir()
+            (base / "checks").mkdir()
+            (base / "a" / "b" / "c" / "d").mkdir(parents=True)
+            (base / ".vdd" / "phase").write_text("RED_VERIFIED")
+
+            # 四次成功的 cd 會讓候選數超過上限；截斷不得把真正的 cwd 擠掉
+            result = run_hook(
+                ".claude/hooks/bash_guard.py",
+                base,
+                {
+                    "tool_input": {
+                        "command": (
+                            "cd a && cd b && cd c && cd d "
+                            "&& cat ../../../../checks/test.py"
+                        )
+                    }
+                },
+            )
+
+            self.assertEqual(result.returncode, 2, result.stderr)
+
+    def test_bash_guard_classifies_grep_exclusion_files(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            base = Path(tmp)
+            write_policy(base, implementation_roots=["app"], test_roots=["checks"])
+            (base / "app").mkdir()
+            (base / "checks").mkdir()
+            (base / ".vdd" / "phase").write_text("RED_VERIFIED")
+
+            for command in (
+                "grep -R --exclude-from=checks/patterns SECRET app",
+                "grep -R --exclude-from checks/patterns SECRET app",
+            ):
+                with self.subTest(blocked=command):
+                    result = run_hook(
+                        ".claude/hooks/bash_guard.py",
+                        base,
+                        {"tool_input": {"command": command}},
+                    )
+                    self.assertEqual(result.returncode, 2, result.stderr)
+
+            allowed = run_hook(
+                ".claude/hooks/bash_guard.py",
+                base,
+                {
+                    "tool_input": {
+                        "command": "grep -R --exclude-from=app/ignore SECRET app"
+                    }
+                },
+            )
+            self.assertEqual(allowed.returncode, 0, allowed.stderr)
+
+    def test_bash_guard_keeps_paths_in_ripgrep_no_pattern_modes(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            base = Path(tmp)
+            write_policy(base, implementation_roots=["app"], test_roots=["checks"])
+            (base / "app").mkdir()
+            (base / "checks").mkdir()
+            (base / ".vdd" / "phase").write_text("RED_VERIFIED")
+
+            # --files 沒有 pattern operand，app 是路徑而不是 pattern
+            allowed = run_hook(
+                ".claude/hooks/bash_guard.py",
+                base,
+                {"tool_input": {"command": "rg --files app"}},
+            )
+            blocked = run_hook(
+                ".claude/hooks/bash_guard.py",
+                base,
+                {"tool_input": {"command": "rg --files checks"}},
+            )
+
+            self.assertEqual(allowed.returncode, 0, allowed.stderr)
+            self.assertEqual(blocked.returncode, 2, blocked.stderr)
+
+    def test_bash_guard_classifies_ripgrep_ignore_files(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            base = Path(tmp)
+            write_policy(base, implementation_roots=["app"], test_roots=["checks"])
+            (base / "app").mkdir()
+            (base / "checks").mkdir()
+            (base / ".vdd" / "phase").write_text("RED_VERIFIED")
+
+            # rg 會開啟並讀取 --ignore-file 指定的規則檔
+            for command in (
+                "rg --ignore-file=checks/ignore SECRET app",
+                "rg --ignore-file checks/ignore SECRET app",
+            ):
+                with self.subTest(blocked=command):
+                    result = run_hook(
+                        ".claude/hooks/bash_guard.py",
+                        base,
+                        {"tool_input": {"command": command}},
+                    )
+                    self.assertEqual(result.returncode, 2, result.stderr)
+
+            allowed = run_hook(
+                ".claude/hooks/bash_guard.py",
+                base,
+                {"tool_input": {"command": "rg --ignore-file=app/ignore SECRET app"}},
+            )
+            self.assertEqual(allowed.returncode, 0, allowed.stderr)
+
+    def test_bash_guard_resolves_cd_against_the_filesystem(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            base = Path(tmp)
+            write_policy(base, implementation_roots=["app"], test_roots=["checks"])
+            (base / "app").mkdir()
+            (base / "checks").mkdir()
+            (base / "h").mkdir()
+            (base / ".vdd" / "phase").write_text("RED_VERIFIED")
+
+            # 只有 h/ 存在：前七個 cd 必定失敗，shell 停在 h/，
+            # 候選集合不該被七條不可能發生的成功分支塞爆
+            blocked = run_hook(
+                ".claude/hooks/bash_guard.py",
+                base,
+                {
+                    "tool_input": {
+                        "command": (
+                            "cd a; cd b; cd c; cd d; cd e; cd f; cd g; cd h; "
+                            "cat ../checks/secret"
+                        )
+                    }
+                },
+            )
+            # 同一行內建立目錄時，成功分支仍必須保留
+            created = run_hook(
+                ".claude/hooks/bash_guard.py",
+                base,
+                {
+                    "tool_input": {
+                        "command": "mkdir -p x && cd x && cat ../checks/secret"
+                    }
+                },
+            )
+            # cd 失敗時 shell 留在原地，相對路徑就落在實作側
+            allowed = run_hook(
+                ".claude/hooks/bash_guard.py",
+                base,
+                {"tool_input": {"command": "cd missing && cat app/login.py"}},
+            )
+
+            self.assertEqual(blocked.returncode, 2, blocked.stderr)
+            self.assertEqual(created.returncode, 2, created.stderr)
+            self.assertEqual(allowed.returncode, 0, allowed.stderr)
+
+    def test_bash_guard_skips_scope_for_ripgrep_exit_only_modes(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            base = Path(tmp)
+            write_policy(base, implementation_roots=["app"], test_roots=["checks"])
+            (base / "app").mkdir()
+            (base / "checks").mkdir()
+            (base / ".vdd" / "phase").write_text("RED_VERIFIED")
+
+            # 這些模式只印出資訊，沒有 cwd scope 可言
+            for command in ("rg --help", "rg --version", "rg --type-list", "rg -h", "rg -V"):
+                with self.subTest(allowed=command):
+                    result = run_hook(
+                        ".claude/hooks/bash_guard.py",
+                        base,
+                        {"tool_input": {"command": command}},
+                    )
+                    self.assertEqual(result.returncode, 0, result.stderr)
+
+            # --files 仍然會列舉 cwd，不在豁免之列
+            blocked = run_hook(
+                ".claude/hooks/bash_guard.py",
+                base,
+                {"tool_input": {"command": "rg --files"}},
+            )
+            self.assertEqual(blocked.returncode, 2, blocked.stderr)
+
+    def test_bash_guard_keeps_quoting_when_reading_redirections(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            base = Path(tmp)
+            write_policy(base, implementation_roots=["app"], test_roots=["checks"])
+            (base / "app").mkdir()
+            (base / "checks").mkdir()
+            (base / ".vdd" / "phase").write_text("RED_VERIFIED")
+
+            # 引號內的 < 是字面文字，不是重導向
+            for command in (
+                "printf '%s\\n' '<checks/secret.py'",
+                'printf "%s" "<checks/secret.py"',
+                "grep SECRET <<< 'checks'",
+            ):
+                with self.subTest(allowed=command):
+                    result = run_hook(
+                        ".claude/hooks/bash_guard.py",
+                        base,
+                        {"tool_input": {"command": command}},
+                    )
+                    self.assertEqual(result.returncode, 0, result.stderr)
+
+            # 未加引號的重導向仍然要擋
+            blocked = run_hook(
+                ".claude/hooks/bash_guard.py",
+                base,
+                {"tool_input": {"command": "printf '%s' x <checks/secret.py"}},
+            )
+            self.assertEqual(blocked.returncode, 2, blocked.stderr)
+
+    def test_bash_guard_parses_attached_prefix_option_values(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            base = Path(tmp)
+            write_policy(base, implementation_roots=["app"], test_roots=["checks"])
+            (base / "app").mkdir()
+            (base / "checks").mkdir()
+            (base / ".vdd" / "phase").write_text("RED_VERIFIED")
+
+            # -uPATH／-n10 的值黏在同一個 token，下一個 token 才是命令
+            for command in (
+                "env -uPATH /bin/cat checks/secret",
+                "nice -n10 cat checks/secret",
+                "nice -n 10 cat checks/secret",
+                "env -u PATH cat checks/secret",
+            ):
+                with self.subTest(blocked=command):
+                    result = run_hook(
+                        ".claude/hooks/bash_guard.py",
+                        base,
+                        {"tool_input": {"command": command}},
+                    )
+                    self.assertEqual(result.returncode, 2, result.stderr)
+
+    def test_bash_guard_reports_redirected_writes_as_writes(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            base = Path(tmp)
+            write_policy(base, implementation_roots=["app"], test_roots=["checks"])
+            (base / "app").mkdir()
+            (base / "checks").mkdir()
+            (base / ".vdd" / "phase").write_text("RED_VERIFIED")
+
+            result = run_hook(
+                ".claude/hooks/bash_guard.py",
+                base,
+                {"tool_input": {"command": "grep SECRET app > checks/out"}},
+            )
+
+            self.assertEqual(result.returncode, 2, result.stderr)
+            violations = next(
+                line for line in result.stderr.splitlines() if "Violations" in line
+            )
+            self.assertIn("重導向寫入", violations)
+            self.assertNotIn("讀取", violations)
+
+    def test_bash_guard_treats_invalid_cd_arity_as_failure(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            base = Path(tmp)
+            write_policy(base, implementation_roots=["app"], test_roots=["checks"])
+            (base / "app").mkdir()
+            (base / "checks").mkdir()
+            (base / ".vdd" / "phase").write_text("RED_VERIFIED")
+
+            # bash 的 cd 只接受一個 [dir]；cd app extra 是 too many arguments，
+            # shell 留在 repository root，相對路徑就落在測試側
+            blocked = run_hook(
+                ".claude/hooks/bash_guard.py",
+                base,
+                {"tool_input": {"command": "cd app extra || cat checks/secret"}},
+            )
+            allowed = run_hook(
+                ".claude/hooks/bash_guard.py",
+                base,
+                {"tool_input": {"command": "cd app && cat login.py"}},
+            )
+
+            self.assertEqual(blocked.returncode, 2, blocked.stderr)
+            self.assertEqual(allowed.returncode, 0, allowed.stderr)
+
+    def test_bash_guard_respects_short_option_arity_in_mode_detection(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            base = Path(tmp)
+            write_policy(base, implementation_roots=["app"], test_roots=["checks"])
+            (base / "app").mkdir()
+            (base / "checks").mkdir()
+            (base / ".vdd" / "phase").write_text("RED_VERIFIED")
+
+            # -g 的值黏在同一個 token，值裡的 h 不是 --help
+            for command in ("rg -g'*.h' SECRET", "rg -g '*.h' SECRET"):
+                with self.subTest(blocked=command):
+                    result = run_hook(
+                        ".claude/hooks/bash_guard.py",
+                        base,
+                        {"tool_input": {"command": command}},
+                    )
+                    self.assertEqual(result.returncode, 2, result.stderr)
+
+            # 真正的 -h／-nh 仍然是 help，不施加 cwd scope
+            for command in ("rg -h", "rg -nh", "rg -g'*.h' SECRET app"):
+                with self.subTest(allowed=command):
+                    result = run_hook(
+                        ".claude/hooks/bash_guard.py",
+                        base,
+                        {"tool_input": {"command": command}},
+                    )
+                    self.assertEqual(result.returncode, 0, result.stderr)
+
+    def test_bash_guard_skips_comparison_operators_in_conditionals(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            base = Path(tmp)
+            write_policy(base, implementation_roots=["app"], test_roots=["checks"])
+            (base / "app").mkdir()
+            (base / "checks").mkdir()
+            (base / ".vdd" / "phase").write_text("RED_VERIFIED")
+
+            # [[ ]] 與 (( )) 裡的 < 是比較運算子，不讀取檔案
+            for command in (
+                "[[ app < checks/secret ]]",
+                "(( 1 < 2 )) && cat app/x.py",
+            ):
+                with self.subTest(allowed=command):
+                    result = run_hook(
+                        ".claude/hooks/bash_guard.py",
+                        base,
+                        {"tool_input": {"command": command}},
+                    )
+                    self.assertEqual(result.returncode, 0, result.stderr)
+
+            # 單括號的 [ ] 裡 bash 仍會重導向，條件式之外的重導向也照擋
+            for command in (
+                "[ app < checks/secret ]",
+                "[[ 1 -lt 2 ]] && cat < checks/secret",
+            ):
+                with self.subTest(blocked=command):
+                    result = run_hook(
+                        ".claude/hooks/bash_guard.py",
+                        base,
+                        {"tool_input": {"command": command}},
+                    )
+                    self.assertEqual(result.returncode, 2, result.stderr)
+
+    def test_bash_guard_tracks_env_prefix_chdir(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            base = Path(tmp)
+            write_policy(base, implementation_roots=["app"], test_roots=["checks"])
+            (base / "app").mkdir()
+            (base / "checks").mkdir()
+            (base / ".vdd" / "phase").write_text("RED_VERIFIED")
+
+            # GNU env 的 -C DIR／--chdir=DIR 會在執行命令前切換工作目錄
+            for command in (
+                "env -C app cat ../checks/secret",
+                "env -Capp cat ../checks/secret",
+                "env --chdir=app cat ../checks/secret",
+                "env --chdir app cat ../checks/secret",
+            ):
+                with self.subTest(blocked=command):
+                    result = run_hook(
+                        ".claude/hooks/bash_guard.py",
+                        base,
+                        {"tool_input": {"command": command}},
+                    )
+                    self.assertEqual(result.returncode, 2, result.stderr)
+
+            # -C 之後仍在實作側就放行；-u 的既有語意不受影響
+            allowed = run_hook(
+                ".claude/hooks/bash_guard.py",
+                base,
+                {"tool_input": {"command": "env -C app cat login.py"}},
+            )
+            self.assertEqual(allowed.returncode, 0, allowed.stderr)
+
+    def test_bash_guard_rejects_unsupported_cd_options(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            base = Path(tmp)
+            write_policy(base, implementation_roots=["app"], test_roots=["checks"])
+            (base / "app").mkdir()
+            (base / "checks").mkdir()
+            (base / ".vdd" / "phase").write_text("RED_VERIFIED")
+
+            # bash 只接受 -L／-P／-e／-@；-Z 是 invalid option，工作目錄不變
+            blocked = run_hook(
+                ".claude/hooks/bash_guard.py",
+                base,
+                {"tool_input": {"command": "cd -Z app || cat checks/secret"}},
+            )
+            # 合法選項仍要正常推進 cwd
+            still_blocked = run_hook(
+                ".claude/hooks/bash_guard.py",
+                base,
+                {"tool_input": {"command": "cd -P app && cat ../checks/secret"}},
+            )
+            allowed = run_hook(
+                ".claude/hooks/bash_guard.py",
+                base,
+                {"tool_input": {"command": "cd -P app && cat login.py"}},
+            )
+
+            self.assertEqual(blocked.returncode, 2, blocked.stderr)
+            self.assertEqual(still_blocked.returncode, 2, still_blocked.stderr)
+            self.assertEqual(allowed.returncode, 0, allowed.stderr)
+
+    def test_bash_guard_expands_static_brace_expressions(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            base = Path(tmp)
+            write_policy(base, implementation_roots=["app"], test_roots=["checks"])
+            (base / "app").mkdir()
+            (base / "checks").mkdir()
+            (base / ".vdd" / "phase").write_text("RED_VERIFIED")
+
+            for command in (
+                "cat {app,checks}/secret",
+                "cat {app/{a,b},checks/c}",
+            ):
+                with self.subTest(blocked=command):
+                    result = run_hook(
+                        ".claude/hooks/bash_guard.py",
+                        base,
+                        {"tool_input": {"command": command}},
+                    )
+                    self.assertEqual(result.returncode, 2, result.stderr)
+
+            # 展開後都在實作側，或不是 alternation／range（bash 原樣保留）
+            for command in ("cat {app,app}/secret", "cat {a..c}/x"):
+                with self.subTest(allowed=command):
+                    result = run_hook(
+                        ".claude/hooks/bash_guard.py",
+                        base,
+                        {"tool_input": {"command": command}},
+                    )
+                    self.assertEqual(result.returncode, 0, result.stderr)
+
+    def test_bash_guard_keeps_conditional_depth_across_separators(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            base = Path(tmp)
+            write_policy(base, implementation_roots=["app"], test_roots=["checks"])
+            (base / "app").mkdir()
+            (base / "checks").mkdir()
+            (base / ".vdd" / "phase").write_text("RED_VERIFIED")
+
+            # [[ ]] 內部的 && 會被 segment 切割拆開，條件式 context 必須延續
+            allowed = run_hook(
+                ".claude/hooks/bash_guard.py",
+                base,
+                {"tool_input": {"command": "[[ x == x && app < checks/secret ]]"}},
+            )
+            # 條件式結束後的重導向仍要擋；沒閉合的 [[ 不得讓整行失去判定
+            for command in (
+                "[[ x == x && a < b ]]; cat < checks/secret",
+                "echo '[[' ; cat < checks/secret",
+            ):
+                with self.subTest(blocked=command):
+                    result = run_hook(
+                        ".claude/hooks/bash_guard.py",
+                        base,
+                        {"tool_input": {"command": command}},
+                    )
+                    self.assertEqual(result.returncode, 2, result.stderr)
+
+            self.assertEqual(allowed.returncode, 0, allowed.stderr)
+
+    def test_bash_guard_keeps_zero_padding_in_brace_ranges(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            base = Path(tmp)
+            write_policy(base, implementation_roots=["app"], test_roots=["checks02"])
+            (base / "app").mkdir()
+            (base / "checks02").mkdir()
+            (base / ".vdd" / "phase").write_text("RED_VERIFIED")
+
+            # bash 的 {01..03} 展開為 01 02 03；洗掉填充就會漏掉 checks02
+            blocked = run_hook(
+                ".claude/hooks/bash_guard.py",
+                base,
+                {"tool_input": {"command": "cat checks{01..03}/secret"}},
+            )
+            allowed = run_hook(
+                ".claude/hooks/bash_guard.py",
+                base,
+                {"tool_input": {"command": "cat app/x{1..3}"}},
+            )
+
+            self.assertEqual(blocked.returncode, 2, blocked.stderr)
+            self.assertEqual(allowed.returncode, 0, allowed.stderr)
+
+    def test_bash_guard_fails_closed_when_brace_expansion_overflows(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            base = Path(tmp)
+            write_policy(base, implementation_roots=["app"], test_roots=["checks"])
+            (base / "app").mkdir()
+            (base / "checks").mkdir()
+            (base / ".vdd" / "phase").write_text("RED_VERIFIED")
+
+            alternatives = ",".join(f"app/x{index}" for index in range(300))
+            # 不得只檢查前 N 條——最後一條才是隔離側
+            blocked = run_hook(
+                ".claude/hooks/bash_guard.py",
+                base,
+                {"tool_input": {"command": f"cat {{{alternatives},checks/secret}}"}},
+            )
+            # 上限之內的展開仍要逐條精確判定，全部在實作側就放行
+            allowed = run_hook(
+                ".claude/hooks/bash_guard.py",
+                base,
+                {"tool_input": {"command": "cat app/{1..900}.txt"}},
+            )
+
+            self.assertEqual(blocked.returncode, 2, blocked.stderr)
+            self.assertEqual(allowed.returncode, 0, allowed.stderr)
+
+    def test_bash_guard_stops_at_a_failed_prefix_chdir(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            base = Path(tmp)
+            write_policy(base, implementation_roots=["app"], test_roots=["checks"])
+            (base / "app").mkdir()
+            (base / "checks").mkdir()
+            (base / ".vdd" / "phase").write_text("RED_VERIFIED")
+
+            # env -C 目的地不存在 → env 失敗，cat 根本不會執行
+            allowed = run_hook(
+                ".claude/hooks/bash_guard.py",
+                base,
+                {"tool_input": {"command": "env -C missingdir cat checks/secret"}},
+            )
+            # 重導向仍由 shell 先做，所以照擋
+            blocked = run_hook(
+                ".claude/hooks/bash_guard.py",
+                base,
+                {"tool_input": {"command": "env -C missingdir wc -c < checks/secret"}},
+            )
+
+            self.assertEqual(allowed.returncode, 0, allowed.stderr)
+            self.assertEqual(blocked.returncode, 2, blocked.stderr)
+
+    def test_bash_guard_opens_conditionals_only_in_command_position(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            base = Path(tmp)
+            write_policy(base, implementation_roots=["app"], test_roots=["checks"])
+            (base / "app").mkdir()
+            (base / "checks").mkdir()
+            (base / ".vdd" / "phase").write_text("RED_VERIFIED")
+
+            # echo 的 [[ 只是引數，不得讓下一段的重導向失去判定
+            blocked = run_hook(
+                ".claude/hooks/bash_guard.py",
+                base,
+                {"tool_input": {"command": "echo [[ && wc -c < checks/secret"}},
+            )
+            # 真正的條件式仍然豁免，巢狀的 [[:digit:]] 也要能正確配對
+            for command in (
+                "[[ x == x && app < checks/secret ]]",
+                "[[ x =~ [[:digit:]] && a < b ]]",
+                "(( 1 < 2 )) && cat app/x.py",
+            ):
+                with self.subTest(allowed=command):
+                    result = run_hook(
+                        ".claude/hooks/bash_guard.py",
+                        base,
+                        {"tool_input": {"command": command}},
+                    )
+                    self.assertEqual(result.returncode, 0, result.stderr)
+
+            self.assertEqual(blocked.returncode, 2, blocked.stderr)
+
+    def test_bash_guard_does_not_expand_quoted_braces(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            base = Path(tmp)
+            write_policy(base, implementation_roots=["app"], test_roots=["checks"])
+            (base / "app").mkdir()
+            (base / "checks").mkdir()
+            (base / ".vdd" / "phase").write_text("RED_VERIFIED")
+
+            # bash 不會展開引號內的大括號，讀的是那個字面路徑
+            allowed = run_hook(
+                ".claude/hooks/bash_guard.py",
+                base,
+                {"tool_input": {"command": "cat '{app,checks}/secret'"}},
+            )
+            # 大括號本身沒被引號包住時仍然要展開
+            for command in ('cat {app,"checks"}/secret', "cat {app,checks}/secret"):
+                with self.subTest(blocked=command):
+                    result = run_hook(
+                        ".claude/hooks/bash_guard.py",
+                        base,
+                        {"tool_input": {"command": command}},
+                    )
+                    self.assertEqual(result.returncode, 2, result.stderr)
+
+            self.assertEqual(allowed.returncode, 0, allowed.stderr)
+
+    def test_bash_guard_expands_stepped_alphabetic_ranges(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            base = Path(tmp)
+            write_policy(base, implementation_roots=["app"], test_roots=["tests"])
+            (base / "app").mkdir()
+            (base / "tests").mkdir()
+            (base / ".vdd" / "phase").write_text("RED_VERIFIED")
+
+            # bash 的 {q..u..2} 展開為 q s u，中間那條就是隔離側
+            for command in ("cat test{q..u..2}/secret", "cat test{q..s}/secret"):
+                with self.subTest(blocked=command):
+                    result = run_hook(
+                        ".claude/hooks/bash_guard.py",
+                        base,
+                        {"tool_input": {"command": command}},
+                    )
+                    self.assertEqual(result.returncode, 2, result.stderr)
+
+            allowed = run_hook(
+                ".claude/hooks/bash_guard.py",
+                base,
+                {"tool_input": {"command": "cat app/x{a..c}"}},
+            )
+            self.assertEqual(allowed.returncode, 0, allowed.stderr)
+
+    def test_bash_guard_enumerates_braces_and_falls_back_above_the_cap(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            base = Path(tmp)
+            write_policy(base, implementation_roots=["app"], test_roots=["checks"])
+            (base / "app").mkdir()
+            (base / "checks").mkdir()
+            (base / ".vdd" / "phase").write_text("RED_VERIFIED")
+
+            alternatives = ",".join(f"x{index}" for index in range(300))
+            over_cap = ",".join(f"app/x{index}" for index in range(1100))
+            for command in (
+                # 上限之內逐條精確判定，traversal 與中途切斷的元件都抓得到
+                "cat app/{1..300}/../../checks/secret",
+                f"cat app/{{{alternatives},../checks/secret}}",
+                "cat check{x0,x1,s}/secret",
+                # 超過上限就整個 word 退回 repository scope
+                f"cat {{{over_cap}}}",
+            ):
+                with self.subTest(blocked=command):
+                    result = run_hook(
+                        ".claude/hooks/bash_guard.py",
+                        base,
+                        {"tool_input": {"command": command}},
+                    )
+                    self.assertEqual(result.returncode, 2, result.stderr)
+
+            # 上限之內就不該有近似判定：range 的 .. 與檔名裡的 .. 都不是 traversal
+            for command in ("cat app/{1..900}.txt", "cat app/{1..300}/foo..bar"):
+                with self.subTest(allowed=command):
+                    result = run_hook(
+                        ".claude/hooks/bash_guard.py",
+                        base,
+                        {"tool_input": {"command": command}},
+                    )
+                    self.assertEqual(result.returncode, 0, result.stderr)
+
+    def test_bash_guard_expands_unquoted_braces_in_mixed_words(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            base = Path(tmp)
+            write_policy(base, implementation_roots=["app"], test_roots=["checks"])
+            (base / "app").mkdir()
+            (base / "checks").mkdir()
+            (base / ".vdd" / "phase").write_text("RED_VERIFIED")
+
+            # 後綴的 {} 被引號包住，但前面的 alternation 沒有，bash 仍會展開
+            blocked = run_hook(
+                ".claude/hooks/bash_guard.py",
+                base,
+                {"tool_input": {"command": "cat {app,checks}/secret'{}'"}},
+            )
+            # 大括號本身被引號包住時才是字面路徑；重導向目標走同一套遮罩
+            for command in (
+                "cat '{app,checks}/secret'",
+                "cat < '{app,checks}/secret'",
+            ):
+                with self.subTest(allowed=command):
+                    result = run_hook(
+                        ".claude/hooks/bash_guard.py",
+                        base,
+                        {"tool_input": {"command": command}},
+                    )
+                    self.assertEqual(result.returncode, 0, result.stderr)
+
+            self.assertEqual(blocked.returncode, 2, blocked.stderr)
+
+    def test_bash_guard_keeps_masks_on_attached_option_values(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            base = Path(tmp)
+            write_policy(base, implementation_roots=["app"], test_roots=["checks"])
+            (base / "app").mkdir()
+            (base / "checks").mkdir()
+            (base / ".vdd" / "phase").write_text("RED_VERIFIED")
+
+            # 附著式選項值的引號遮罩必須跟著切，否則引號內的大括號會被誤展開
+            for command in (
+                'grep --exclude-from="{app,checks}/patterns" SECRET app',
+                'grep -f"{app,checks}/patterns" SECRET app',
+            ):
+                with self.subTest(allowed=command):
+                    result = run_hook(
+                        ".claude/hooks/bash_guard.py",
+                        base,
+                        {"tool_input": {"command": command}},
+                    )
+                    self.assertEqual(result.returncode, 0, result.stderr)
+
+            # 沒有引號時仍然要展開並擋下
+            blocked = run_hook(
+                ".claude/hooks/bash_guard.py",
+                base,
+                {
+                    "tool_input": {
+                        "command": "grep --exclude-from={app,checks}/patterns SECRET app"
+                    }
+                },
+            )
+            self.assertEqual(blocked.returncode, 2, blocked.stderr)
+
+    def test_bash_guard_keeps_nonspecial_backslashes_in_double_quotes(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            base = Path(tmp)
+            write_policy(base, implementation_roots=["app"], test_roots=["checks"])
+            (base / "app").mkdir()
+            (base / "checks").mkdir()
+            (base / ".vdd" / "phase").write_text("RED_VERIFIED")
+
+            # bash 只吃掉 $ ` " \ 與換行前的反斜線；check\s 不是 checks
+            for command in (
+                'cat "check\\s/secret"',
+                "cat 'check\\s/secret'",
+                'cat "checks\\$/secret"',
+            ):
+                with self.subTest(allowed=command):
+                    result = run_hook(
+                        ".claude/hooks/bash_guard.py",
+                        base,
+                        {"tool_input": {"command": command}},
+                    )
+                    self.assertEqual(result.returncode, 0, result.stderr)
+
+            # 真正的路徑仍然要擋
+            blocked = run_hook(
+                ".claude/hooks/bash_guard.py",
+                base,
+                {"tool_input": {"command": 'cat "checks/secret"'}},
+            )
+            self.assertEqual(blocked.returncode, 2, blocked.stderr)
+
+    def test_bash_guard_strips_quoted_line_continuations(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            base = Path(tmp)
+            write_policy(base, implementation_roots=["app"], test_roots=["checks"])
+            (base / "app").mkdir()
+            (base / "checks").mkdir()
+            (base / ".vdd" / "phase").write_text("RED_VERIFIED")
+
+            # bash 會吃掉反斜線＋換行，"check\<newline>s/secret" 就是 checks/secret
+            blocked = run_hook(
+                ".claude/hooks/bash_guard.py",
+                base,
+                {"tool_input": {"command": 'cat "check\\\ns/secret"'}},
+            )
+            # 單引號內是字面文字，bash 不移除，也就不會組成隔離側路徑
+            allowed = run_hook(
+                ".claude/hooks/bash_guard.py",
+                base,
+                {"tool_input": {"command": "cat 'check\\\ns/secret'"}},
+            )
+
+            self.assertEqual(blocked.returncode, 2, blocked.stderr)
+            self.assertEqual(allowed.returncode, 0, allowed.stderr)
+
+    def test_bash_guard_infers_cwd_scope_when_operands_are_not_paths(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            base = Path(tmp)
+            write_policy(base, implementation_roots=["app"], test_roots=["checks"])
+            (base / "app").mkdir()
+            (base / "checks").mkdir()
+            (base / ".vdd" / "phase").write_text("RED_VERIFIED")
+
+            # 未列在選項表裡的吃值選項會讓值與 pattern 被誤判成路徑；
+            # operand 一個都不存在時 rg 其實搜尋整個 cwd
+            for command in (
+                "rg --sort path SECRET",
+                "rg --sort=path SECRET",
+                "rg --unknownopt path SECRET",
+            ):
+                with self.subTest(blocked=command):
+                    result = run_hook(
+                        ".claude/hooks/bash_guard.py",
+                        base,
+                        {"tool_input": {"command": command}},
+                    )
+                    self.assertEqual(result.returncode, 2, result.stderr)
+
+            # 真的有路徑 operand 時仍然限縮在該路徑
+            for command in ("rg SECRET app", "rg checks app", "rg -g'*.h' SECRET app"):
+                with self.subTest(allowed=command):
+                    result = run_hook(
+                        ".claude/hooks/bash_guard.py",
+                        base,
+                        {"tool_input": {"command": command}},
+                    )
+                    self.assertEqual(result.returncode, 0, result.stderr)
+
+    def test_bash_guard_anchors_overflow_fallback_at_the_root(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            base = Path(tmp)
+            write_policy(base, implementation_roots=["app"], test_roots=["checks"])
+            (base / "app").mkdir()
+            (base / "checks").mkdir()
+            (base / ".vdd" / "phase").write_text("RED_VERIFIED")
+
+            over_cap = ",".join(f"x{index}" for index in range(1100))
+            # cd 之後 "." 只涵蓋 app/，不是承諾的 repository-wide fallback
+            result = run_hook(
+                ".claude/hooks/bash_guard.py",
+                base,
+                {
+                    "tool_input": {
+                        "command": f"cd app && cat {{{over_cap},../checks/secret}}"
+                    }
+                },
+            )
+
+            self.assertEqual(result.returncode, 2, result.stderr)
+
+    def test_bash_guard_keeps_cwd_scope_for_stdin_ignoring_modes(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            base = Path(tmp)
+            write_policy(base, implementation_roots=["app"], test_roots=["checks"])
+            (base / "app").mkdir()
+            (base / "checks").mkdir()
+            (base / ".vdd" / "phase").write_text("RED_VERIFIED")
+
+            # --files 不理會 stdin，接在 pipe 之後仍然列出整個 cwd
+            blocked = run_hook(
+                ".claude/hooks/bash_guard.py",
+                base,
+                {"tool_input": {"command": "printf x | rg --files"}},
+            )
+            # 一般搜尋接在 pipe 之後讀的是 stdin，不是 cwd
+            allowed = run_hook(
+                ".claude/hooks/bash_guard.py",
+                base,
+                {"tool_input": {"command": "printf x | rg SECRET"}},
+            )
+
+            self.assertEqual(blocked.returncode, 2, blocked.stderr)
+            self.assertEqual(allowed.returncode, 0, allowed.stderr)
+
+    def test_setup_protocol_documents_the_read_side_guard(self):
+        protocol = (ROOT / "setup" / "AGENT_SETUP_PROTOCOL.md").read_text()
+
+        self.assertIn("CM-08", protocol)
+        self.assertIn("read_isolation_guard.py", protocol)
+        self.assertIn("8 個 .py 檔案", protocol)
+        self.assertEqual(
+            len(list((ROOT / ".claude" / "hooks").glob("*.py"))),
+            8,
+        )
+
     def test_managed_settings_remove_fixed_folder_and_agent_restrictions(self):
         managed = json.loads(
             (ROOT / "setup" / "templates" / "managed-settings.json").read_text()

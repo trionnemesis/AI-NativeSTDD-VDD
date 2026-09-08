@@ -47,9 +47,9 @@ confirm_mode_checklist:
     command: "python3 .claude/hooks/path_policy.py && cat .vdd/phase"
 
   - id: "CM-04"
-    check: "6 個 hook entrypoints 與 path_policy.py 存在"
+    check: "7 個 hook entrypoints 與 path_policy.py 存在"
     command: "ls .claude/hooks/"
-    expected: "7 個 .py 檔案"
+    expected: "8 個 .py 檔案"
 
   - id: "CM-05"
     check: "project settings 有 PreToolUse／Stop／UserPromptSubmit hooks"
@@ -62,7 +62,46 @@ confirm_mode_checklist:
   - id: "CM-07"
     check: "System／Change Profile、Evidence 與 Release contract 可載入"
     command: "test -f governance/profiles/system.yaml && test -f governance/profiles/change.yaml && test -f governance/gates/vdd.yaml && test -f governance/gates/deploy.yaml"
+
+  - id: "CM-08"
+    check: "read-side isolation guard 已註冊於 PreToolUse Read|Grep|Glob"
+    command: "python3 -c \"import json; p=json.load(open('.claude/settings.json'))['hooks']['PreToolUse']; assert any(e.get('matcher')=='Read|Grep|Glob' and any('read_isolation_guard.py' in h['command'] for h in e['hooks']) for e in p)\""
+    note: "檔案存在只證明 configured；還需 CM-03 的 .vdd/phase 才能決定 lane"
 ```
+
+`GATE:RED` 的 `agent_isolation_enforced` 有兩側，兩側都由 `.vdd/phase` 決定方向：
+
+| phase | lane | 不可讀 |
+|---|---|---|
+| `RED_VERIFIED` | implementation | configured `test_roots`，以及實作側命中 `test_file_patterns` 者 |
+| `GREEN` | cycle_complete | （不施加 read isolation） |
+| 其他（含 `INIT` 與檔案不存在） | test_authoring | configured `implementation_roots` |
+
+`protected_spec_roots` 兩側都可讀——Canonical Spec 是雙方共同的約束來源。
+
+`GREEN` 不是 lane，是 cycle 結束狀態。`green_gate` 寫入 `GREEN` 後沒有任何
+task boundary 會把它復位，因此不得把它當成下一個任務的實作側——否則後續每個
+任務的 test author 都會讀不到既有測試、卻讀得到實作，正好是反過來的隔離。
+read isolation 由下一輪 RED 驗證（phase 轉回 `RED_VERIFIED`）重新武裝。
+
+**已知缺口**：同一個任務週期結束後、下一輪 RED 驗證之前，phase 停在 `GREEN`，
+這段期間沒有 read isolation。補上 task-boundary 的 phase 復位會同時改變
+`GATE:RED` 的寫入語意，屬於 governance 決策，不在 hook 層自行決定。
+
+`Grep`／`Glob` 必須錨定搜尋範圍：給 `path=`，或讓 pattern 有字面前綴。
+`**/checks/**/*.py` 這種能穿進被隔離一側、hook 又無法證明它不會的 pattern
+一律擋下。被隔離的那一側在 repository 內不存在時（例如尚未建立 `tests/`），
+兩支 guard 的 read 判定都跳過——沒有東西可讀，擋了只是誤傷。
+
+Bash 側會追蹤同一行內的 `cd`，`cd app && cat ../checks/test_a.py` 會以新的
+cwd 解析後判定。`cd` 目的地無法靜態判定時（`$VAR`、`-`、glob）退回以
+repository root 解析，**不**擋下：這支 guard 也會掃到 heredoc 與引號內的文字，
+把「判不出來」一律當違規會讓整行後續的 reader 全部誤判。代價是判不出來的 `cd`
+之後、指向被隔離一側的相對路徑可能漏掉——已知殘留，不是安全邊界。
+
+**判定粒度是目錄。** co-located test（`app/login.spec.ts`）在 `Read` 與 Bash
+單檔讀取上擋得住，但錨定到 `app/` 的搜尋無法逐檔排除它。需要嚴格隔離的專案
+應以 `test_roots` 分離目錄，而不是依賴 `test_file_patterns`。
 
 **任何項目 FAIL → 進入 Configure Mode 執行對應 Phase**
 
@@ -168,6 +207,7 @@ bash setup/init.sh . .vdd/path-policy.json
 3. `red_evidence_template` 解析後的 JSON 不存在，卻要求進入實作
 4. 請求弱化測試（pytest.skip / assert True / xfail）
 5. T3 需求沒有人工授權就嘗試 auto-dispatch
+6. 為了讀取當前 lane 不可讀的一側，而改用 Bash、改寫 `.vdd/phase` 或停用 hook
 
 ---
 
@@ -181,10 +221,11 @@ CONFIRM MODE RESULT:
   CM-01: PASS — VDD = Verification & Validation-Driven Dev, GATE:RED = runtime 強制
   CM-02: PASS — managed-settings.json 存在
   CM-03: PASS — path policy JSON valid；.vdd/phase = RED_VERIFIED
-  CM-04: PASS — 6 個 hook entrypoints + path_policy.py 存在
+  CM-04: PASS — 7 個 hook entrypoints + path_policy.py 存在
   CM-05: PASS — project hooks: PreToolUse, Stop, UserPromptSubmit, SessionStart
   CM-06: PASS — red-verifier subagent 存在
   CM-07: PASS — profile、VDD 與 deploy contracts 可載入
+  CM-08: PASS — read_isolation_guard.py 已註冊於 Read|Grep|Glob
 
 ENVIRONMENT STATUS: READY
 NEXT ACTION: 可以開始接受任務
