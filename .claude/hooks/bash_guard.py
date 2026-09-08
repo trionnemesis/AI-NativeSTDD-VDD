@@ -73,17 +73,50 @@ def split_tokens(segment):
         return segment.split()
 
 
+# grep/rg/ag 的第一個 positional 是 PATTERN，sed 是 script，awk 是程式碼——都不是路徑。
+# 把它們當路徑會誤擋 `rg checks app` 這種合法搜尋。
+PATTERN_FIRST_READERS = frozenset({"grep", "rg", "ag", "sed", "awk"})
+PATTERN_OPTIONS = frozenset({"-e", "--regexp", "-f", "--file", "--expression"})
+VALUE_OPTIONS = PATTERN_OPTIONS | frozenset(
+    {"-m", "--max-count", "--include", "--exclude", "-g", "--glob", "--type", "-t"}
+)
+
+
 def segment_command(tokens):
-    """跳過前置 env assignment，回傳 (command_name, positional_arguments)。"""
+    """跳過前置 env assignment，回傳 (command_name, remaining_tokens)。"""
     index = 0
     while index < len(tokens) and "=" in tokens[index] and not tokens[index].startswith("-"):
         index += 1
     if index >= len(tokens):
         return None, []
-    arguments = [
-        token for token in tokens[index + 1:] if token and not token.startswith("-")
-    ]
-    return PurePosixPath(tokens[index]).name, arguments
+    return PurePosixPath(tokens[index]).name, tokens[index + 1:]
+
+
+def path_operands(name, tokens):
+    """從 reader 的引數取出真正的路徑 operand。"""
+    operands = []
+    pattern_supplied = False
+    index = 0
+    while index < len(tokens):
+        token = tokens[index]
+        if token == "--":
+            operands.extend(item for item in tokens[index + 1:] if item)
+            break
+        if token.startswith("-") and token != "-":
+            option = token.split("=", 1)[0]
+            if option in PATTERN_OPTIONS:
+                pattern_supplied = True
+            if option in VALUE_OPTIONS and "=" not in token:
+                index += 2
+                continue
+            index += 1
+            continue
+        if token:
+            operands.append(token)
+        index += 1
+    if name in PATTERN_FIRST_READERS and not pattern_supplied and operands:
+        return operands[1:]
+    return operands
 
 
 def read_targets(shell_command, root):
@@ -95,11 +128,13 @@ def read_targets(shell_command, root):
     """
     targets = []
     cwd = root
-    for segment in re.split(r"[|;&]+|\$\(|\)|`", shell_command):
-        name, arguments = segment_command(split_tokens(segment))
+    # 換行在 shell 裡也是 command separator，漏掉它就會讓整段多行命令只被當成一個 segment。
+    for segment in re.split(r"[|;&\n\r]+|\$\(|\)|`", shell_command):
+        name, tokens = segment_command(split_tokens(segment))
         if name is None:
             continue
         if name in CD_COMMANDS:
+            arguments = path_operands(name, tokens)
             opaque = not arguments or arguments[0] == "-" or any(
                 character in arguments[0] for character in OPAQUE_CD_ARGUMENT
             )
@@ -107,7 +142,7 @@ def read_targets(shell_command, root):
             continue
         if name not in READ_COMMANDS:
             continue
-        for argument in arguments:
+        for argument in path_operands(name, tokens):
             if Path(argument).is_absolute():
                 targets.append(argument)
             else:

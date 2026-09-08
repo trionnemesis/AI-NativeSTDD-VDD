@@ -201,6 +201,16 @@ def load_policy(path: Path | None = None) -> dict[str, Any]:
     return policy
 
 
+COLOCATED_SCAN_LIMIT = 5000
+
+
+def forbidden_roots(policy: dict[str, Any], forbidden: str) -> list[str]:
+    """The configured roots belonging to the isolated side."""
+    if forbidden == "test":
+        return list(policy["test_roots"])
+    return list(policy["implementation_roots"])
+
+
 def isolated_side_exists(
     policy: dict[str, Any], forbidden: str, root: Path | None = None
 ) -> bool:
@@ -209,11 +219,45 @@ def isolated_side_exists(
     When it does not, nothing can be reached and the guards stay inert — otherwise
     this governance repository, which has no src/, would block its own searches.
     """
-    roots = (
-        policy["test_roots"] if forbidden == "test" else policy["implementation_roots"]
-    )
     base = root or project_root()
-    return any((base / candidate).is_dir() for candidate in roots)
+    if any((base / candidate).is_dir() for candidate in forbidden_roots(policy, forbidden)):
+        return True
+    if forbidden != "test":
+        return False
+    # test_roots 不存在不代表沒有測試：co-located layout 的測試就住在 implementation
+    # roots 底下。掃描設上限，掃不完時回報「存在」——寧可留著 guard，也不要靜默停用。
+    scanned = 0
+    for candidate in policy["implementation_roots"]:
+        directory = base / candidate
+        if not directory.is_dir():
+            continue
+        for path in directory.rglob("*"):
+            scanned += 1
+            if scanned > COLOCATED_SCAN_LIMIT:
+                return True
+            if path.is_file() and matches_test_path(str(path), policy):
+                return True
+    return False
+
+
+def scope_reaches_forbidden(
+    raw_path: str, policy: dict[str, Any], forbidden: str
+) -> bool:
+    """Whether a search scope contains (rather than sits inside) an isolated root.
+
+    `path: "."` classifies as "other" yet traverses the whole repository, so a
+    containment check is required on top of classify_path.
+    """
+    relative = repo_relative_path(raw_path)
+    if relative is None:
+        return False
+    normalized = "" if relative in (".", "") else relative
+    if not normalized:
+        return True
+    return any(
+        root == normalized or root.startswith(f"{normalized}/")
+        for root in forbidden_roots(policy, forbidden)
+    )
 
 
 def read_lane(phase: str | None) -> str:

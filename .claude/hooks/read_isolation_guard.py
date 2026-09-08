@@ -19,6 +19,7 @@ from path_policy import (
     read_lane,
     read_phase,
     red_evidence_root,
+    scope_reaches_forbidden,
 )
 
 LANE_RULES = {
@@ -70,8 +71,12 @@ def forbidden_target(tool_name, tool_input, policy, phase):
         return None
 
     base = text_field(tool_input, "path")
-    if base and classify_path(base, policy) == forbidden:
-        return base, "forbidden"
+    if base:
+        if classify_path(base, policy) == forbidden:
+            return base, "forbidden"
+        # path="." 分類是 other，卻涵蓋整個 repository；錨定必須排除這種 scope。
+        if scope_reaches_forbidden(base, policy, forbidden):
+            return base, "scope"
 
     # Glob 的 pattern 本身就是 path glob；Grep 的 glob 只是檔名 filter。
     pattern = text_field(tool_input, "pattern" if tool_name == "Glob" else "glob")
@@ -109,14 +114,20 @@ def main():
     target, reason = outcome
     lane = read_lane(phase)
     rule = LANE_RULES[lane]
-    if reason == "unanchored":
+    if reason in ("unanchored", "scope"):
+        detail = (
+            "  這個 pattern 能穿進被隔離的一側，hook 無法證明它不會。"
+            if reason == "unanchored"
+            else "  這個 path 涵蓋了被隔離的一側。"
+        )
         print(
             "BLOCKED [GATE:RED agent_isolation_enforced]: 未錨定的搜尋範圍。\n"
             f"  tool: {tool_name}\n"
-            f"  pattern: {target}\n"
+            f"  scope: {target}\n"
             f"  phase: {phase!r}（lane={lane}）\n"
-            "  這個 pattern 能穿進被隔離的一側，hook 無法證明它不會。\n"
-            "  請以 path= 指定搜尋根目錄，或給 pattern 一個字面前綴。",
+            f"{detail}\n"
+            "  請以 path= 指定不含被隔離一側的搜尋根目錄，"
+            "或給 pattern 一個字面前綴。",
             file=sys.stderr,
         )
         return 2

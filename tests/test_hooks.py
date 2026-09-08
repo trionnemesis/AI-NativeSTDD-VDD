@@ -918,6 +918,110 @@ class HookTests(unittest.TestCase):
                     )
                     self.assertEqual(allowed.returncode, 0, allowed.stderr)
 
+    def test_bash_guard_guards_colocated_tests_without_a_test_root(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            base = Path(tmp)
+            write_policy(base, implementation_roots=["app"], test_roots=["checks"])
+            (base / "app").mkdir()
+            # checks/ 不存在，但 co-located test 存在——隔離側仍然「存在」
+            (base / "app" / "login.spec.ts").write_text("x\n")
+            (base / ".vdd" / "phase").write_text("RED_VERIFIED")
+
+            blocked = run_hook(
+                ".claude/hooks/bash_guard.py",
+                base,
+                {"tool_input": {"command": "cat app/login.spec.ts"}},
+            )
+            allowed = run_hook(
+                ".claude/hooks/bash_guard.py",
+                base,
+                {"tool_input": {"command": "cat app/login.py"}},
+            )
+
+            self.assertEqual(blocked.returncode, 2, blocked.stderr)
+            self.assertEqual(allowed.returncode, 0, allowed.stderr)
+
+    def test_bash_guard_separates_search_patterns_from_paths(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            base = Path(tmp)
+            write_policy(base, implementation_roots=["app"], test_roots=["checks"])
+            (base / "app").mkdir()
+            (base / "checks").mkdir()
+            (base / ".vdd" / "phase").write_text("RED_VERIFIED")
+
+            # grep/rg/sed/awk 的第一個 positional 是 pattern／script，不是路徑
+            for command in ("rg checks app", "grep -e checks -rn app"):
+                with self.subTest(allowed=command):
+                    result = run_hook(
+                        ".claude/hooks/bash_guard.py",
+                        base,
+                        {"tool_input": {"command": command}},
+                    )
+                    self.assertEqual(result.returncode, 0, result.stderr)
+
+            for command in (
+                "rg assert checks",
+                "sed -n 1,5p checks/test_a.py",
+                "awk {print} checks/test_a.py",
+            ):
+                with self.subTest(blocked=command):
+                    result = run_hook(
+                        ".claude/hooks/bash_guard.py",
+                        base,
+                        {"tool_input": {"command": command}},
+                    )
+                    self.assertEqual(result.returncode, 2, result.stderr)
+
+    def test_bash_guard_treats_newlines_as_command_separators(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            base = Path(tmp)
+            write_policy(base, implementation_roots=["app"], test_roots=["checks"])
+            (base / "app").mkdir()
+            (base / "checks").mkdir()
+            (base / ".vdd" / "phase").write_text("RED_VERIFIED")
+
+            for command in (
+                "cd app\ncat ../checks/test_a.py",
+                "echo before\ncat checks/test_a.py",
+            ):
+                with self.subTest(command=command):
+                    result = run_hook(
+                        ".claude/hooks/bash_guard.py",
+                        base,
+                        {"tool_input": {"command": command}},
+                    )
+                    self.assertEqual(result.returncode, 2, result.stderr)
+
+    def test_read_isolation_guard_rejects_scopes_containing_the_isolated_side(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            base = Path(tmp)
+            write_policy(base, implementation_roots=["app"], test_roots=["checks"])
+            (base / "app").mkdir()
+            (base / "checks").mkdir()
+            (base / ".vdd" / "phase").write_text("RED_VERIFIED")
+
+            # path="." 分類是 other，卻涵蓋 checks/
+            for payload in (
+                {
+                    "tool_name": "Glob",
+                    "tool_input": {"path": ".", "pattern": "**/*.py"},
+                },
+                {"tool_name": "Grep", "tool_input": {"pattern": "x", "path": "."}},
+            ):
+                with self.subTest(payload=payload):
+                    result = run_hook(
+                        ".claude/hooks/read_isolation_guard.py", base, payload
+                    )
+                    self.assertEqual(result.returncode, 2, result.stderr)
+                    self.assertIn("未錨定", result.stderr)
+
+            allowed = run_hook(
+                ".claude/hooks/read_isolation_guard.py",
+                base,
+                {"tool_name": "Grep", "tool_input": {"pattern": "x", "path": "app"}},
+            )
+            self.assertEqual(allowed.returncode, 0, allowed.stderr)
+
     def test_setup_protocol_documents_the_read_side_guard(self):
         protocol = (ROOT / "setup" / "AGENT_SETUP_PROTOCOL.md").read_text()
 
