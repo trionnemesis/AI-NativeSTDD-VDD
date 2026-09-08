@@ -164,7 +164,7 @@ FILE_LONG_OPTIONS = frozenset(
     {"--file", "--exclude-from", "--include-from", "--ignore-file"}
 )
 VALUE_LONG_OPTIONS = PATTERN_LONG_OPTIONS | FILE_LONG_OPTIONS | frozenset(
-    {"--max-count", "--include", "--exclude", "--glob", "--type"}
+    {"--max-count", "--include", "--exclude", "--glob", "--type", "--sort", "--sortr"}
 )
 # rg 的這些模式沒有 pattern operand，第一個 positional 就是路徑。
 NO_PATTERN_LONG_OPTIONS = frozenset({"--files", "--type-list", "--help", "--version"})
@@ -174,6 +174,9 @@ NO_SEARCH_LONG_OPTIONS = frozenset({"--type-list", "--help", "--version"})
 # 短旗標的語意逐命令不同（grep -h 是 --no-filename），只為已驗證的命令宣告。
 # 依本機 rg 14.1.0 --help：`-h, --help`、`-V, --version`。
 NO_SEARCH_SHORT_OPTIONS = {"rg": "hV"}
+# --files 不理會 stdin：本機 rg 14.1.0 實測 `printf x | rg --files`
+# 仍然列出 cwd 底下的檔案，所以 pipe 不該讓 cwd scope 消失。
+STDIN_IGNORING_OPTIONS = frozenset({"--files", "--type-list"})
 # 分組語法與 command prefix 必須先剝掉，否則 (cat x 的命令名會是 "(cat"。
 # prefix 自己的選項也要吃掉，否則 command -p cat x 的命令名會變成 "-p"。
 COMMAND_PREFIXES = {
@@ -361,6 +364,40 @@ def _read_word(text, index):
     return Word("".join(word), "".join(mask)), index
 
 
+def strip_line_continuations(command):
+    """移除 shell 會吃掉的反斜線＋換行。
+
+    segment 切割在原始文字上做，而換行是 command separator；不先移除就會把
+    "check\\<newline>s/secret" 這個 word 切成兩段，兩段都判不出隔離側。
+    單引號內的反斜線＋換行是字面文字，bash 不移除，這裡也不移除。
+    """
+    result = []
+    quote = None
+    index = 0
+    while index < len(command):
+        character = command[index]
+        if quote == "'":
+            if character == "'":
+                quote = None
+            result.append(character)
+            index += 1
+            continue
+        following = command[index + 1:index + 2]
+        if character == "\\" and following == "\n":
+            index += 2
+            continue
+        if character == "\\" and following:
+            result.append(character)
+            result.append(following)
+            index += 2
+            continue
+        if character in QUOTE_CHARACTERS:
+            quote = None if quote == character else (quote or character)
+        result.append(character)
+        index += 1
+    return "".join(result)
+
+
 def command_position(segment):
     """回傳 segment 中命令字的起始位置（跳過空白、! 與控制關鍵字）。"""
     index = 0
@@ -517,6 +554,11 @@ def no_search_mode(name, tokens):
     return _has_option(
         name, tokens, NO_SEARCH_LONG_OPTIONS, NO_SEARCH_SHORT_OPTIONS.get(name, "")
     )
+
+
+def ignores_stdin(name, tokens):
+    """這次呼叫是否不理會 stdin，因此接在 pipe 之後仍然搜尋 cwd。"""
+    return _has_option(name, tokens, STDIN_IGNORING_OPTIONS, "")
 
 
 def path_operands(name, tokens):
@@ -732,7 +774,7 @@ def expand_braces(text, mask):
     return results, False
 
 
-def _resolve(argument, cwds):
+def _resolve(argument, cwds, root=None):
     """展開 brace 之後，相對路徑要對每個候選 cwd 各解析一次。"""
     mask = word_mask(argument)
     words, truncated = expand_braces(str(argument), mask)
@@ -740,7 +782,9 @@ def _resolve(argument, cwds):
         # 超過上限就無法逐一檢查。任何比 repository scope 更窄的推測都要求
         # 「所有展開結果都在某個前綴底下」，而 .. 與切在元件中間的前綴都會
         # 讓那個前提不成立，因此直接退回整個 repository。
-        words = ["."]
+        # 必須用 repository root 本身，不能用 "."：cd 之後的 cwd 相對解析
+        # 只會涵蓋當前目錄，那不是承諾的 repository-wide fallback。
+        return [str(root)] if root is not None else ["."]
     resolved = []
     for word in words:
         if Path(word).is_absolute():
@@ -782,6 +826,7 @@ def shell_targets(shell_command, root):
     written = []
     # cd 到不存在的目錄一定失敗，這是可以直接觀測的事實，不必用假設分支去猜。
     # 例外是同一行內可能先建立目錄，那時才保留成功與失敗兩條分支。
+    shell_command = strip_line_continuations(shell_command)
     may_create = DIRECTORY_CREATING_COMMANDS.search(shell_command) is not None
     # success_cwd 是「每個 cd 都成功」的路徑；分支展開時優先保留它。
     success_cwd = root
@@ -822,7 +867,7 @@ def shell_targets(shell_command, root):
         if (
             not operands
             and not redirect_reads
-            and not piped
+            and (not piped or ignores_stdin(name, remaining))
             and implicit_cwd_scope(name, remaining)
         ):
             # 這些 reader 不帶路徑時遞迴搜尋 cwd，那就是這次搜尋的 scope。
@@ -843,13 +888,27 @@ def shell_targets(shell_command, root):
                 # env -C 的目的地不存在時 env 直接失敗，被包裝的命令不會執行，
                 # operand 一個都不會被讀到。重導向仍由 shell 先做，所以保留。
                 operands = []
+        # rg／ag 只有在 operand 真的是路徑時才限縮搜尋範圍。operand 一個都不存在，
+        # 代表它們是 pattern 或未列在選項表裡的選項值——那種情況 rg 搜尋整個 cwd。
+        # 這比「把所有吃值的選項列全」可靠：選項表永遠列不完，而漏列就是靜默漏擋。
+        if (
+            operands
+            and name in IMPLICIT_CWD_READERS
+            and not no_search_mode(name, remaining)
+            and not any(
+                Path(resolved).exists()
+                for argument in operands
+                for resolved in _resolve(argument, segment_cwds, root)
+            )
+        ):
+            operands = [*operands, "."]
         for argument in operands:
-            targets.extend(_resolve(argument, segment_cwds))
+            targets.extend(_resolve(argument, segment_cwds, root))
         # 重導向由 shell 在自己的 cwd 完成，不受 prefix chdir 影響。
         for argument in redirect_reads:
-            targets.extend(_resolve(argument, cwds))
+            targets.extend(_resolve(argument, cwds, root))
         for argument in redirect_writes:
-            written.extend(_resolve(argument, cwds))
+            written.extend(_resolve(argument, cwds, root))
     return targets, written
 
 

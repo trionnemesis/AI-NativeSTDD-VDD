@@ -2162,6 +2162,109 @@ class HookTests(unittest.TestCase):
             )
             self.assertEqual(blocked.returncode, 2, blocked.stderr)
 
+    def test_bash_guard_strips_quoted_line_continuations(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            base = Path(tmp)
+            write_policy(base, implementation_roots=["app"], test_roots=["checks"])
+            (base / "app").mkdir()
+            (base / "checks").mkdir()
+            (base / ".vdd" / "phase").write_text("RED_VERIFIED")
+
+            # bash 會吃掉反斜線＋換行，"check\<newline>s/secret" 就是 checks/secret
+            blocked = run_hook(
+                ".claude/hooks/bash_guard.py",
+                base,
+                {"tool_input": {"command": 'cat "check\\\ns/secret"'}},
+            )
+            # 單引號內是字面文字，bash 不移除，也就不會組成隔離側路徑
+            allowed = run_hook(
+                ".claude/hooks/bash_guard.py",
+                base,
+                {"tool_input": {"command": "cat 'check\\\ns/secret'"}},
+            )
+
+            self.assertEqual(blocked.returncode, 2, blocked.stderr)
+            self.assertEqual(allowed.returncode, 0, allowed.stderr)
+
+    def test_bash_guard_infers_cwd_scope_when_operands_are_not_paths(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            base = Path(tmp)
+            write_policy(base, implementation_roots=["app"], test_roots=["checks"])
+            (base / "app").mkdir()
+            (base / "checks").mkdir()
+            (base / ".vdd" / "phase").write_text("RED_VERIFIED")
+
+            # 未列在選項表裡的吃值選項會讓值與 pattern 被誤判成路徑；
+            # operand 一個都不存在時 rg 其實搜尋整個 cwd
+            for command in (
+                "rg --sort path SECRET",
+                "rg --sort=path SECRET",
+                "rg --unknownopt path SECRET",
+            ):
+                with self.subTest(blocked=command):
+                    result = run_hook(
+                        ".claude/hooks/bash_guard.py",
+                        base,
+                        {"tool_input": {"command": command}},
+                    )
+                    self.assertEqual(result.returncode, 2, result.stderr)
+
+            # 真的有路徑 operand 時仍然限縮在該路徑
+            for command in ("rg SECRET app", "rg checks app", "rg -g'*.h' SECRET app"):
+                with self.subTest(allowed=command):
+                    result = run_hook(
+                        ".claude/hooks/bash_guard.py",
+                        base,
+                        {"tool_input": {"command": command}},
+                    )
+                    self.assertEqual(result.returncode, 0, result.stderr)
+
+    def test_bash_guard_anchors_overflow_fallback_at_the_root(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            base = Path(tmp)
+            write_policy(base, implementation_roots=["app"], test_roots=["checks"])
+            (base / "app").mkdir()
+            (base / "checks").mkdir()
+            (base / ".vdd" / "phase").write_text("RED_VERIFIED")
+
+            over_cap = ",".join(f"x{index}" for index in range(1100))
+            # cd 之後 "." 只涵蓋 app/，不是承諾的 repository-wide fallback
+            result = run_hook(
+                ".claude/hooks/bash_guard.py",
+                base,
+                {
+                    "tool_input": {
+                        "command": f"cd app && cat {{{over_cap},../checks/secret}}"
+                    }
+                },
+            )
+
+            self.assertEqual(result.returncode, 2, result.stderr)
+
+    def test_bash_guard_keeps_cwd_scope_for_stdin_ignoring_modes(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            base = Path(tmp)
+            write_policy(base, implementation_roots=["app"], test_roots=["checks"])
+            (base / "app").mkdir()
+            (base / "checks").mkdir()
+            (base / ".vdd" / "phase").write_text("RED_VERIFIED")
+
+            # --files 不理會 stdin，接在 pipe 之後仍然列出整個 cwd
+            blocked = run_hook(
+                ".claude/hooks/bash_guard.py",
+                base,
+                {"tool_input": {"command": "printf x | rg --files"}},
+            )
+            # 一般搜尋接在 pipe 之後讀的是 stdin，不是 cwd
+            allowed = run_hook(
+                ".claude/hooks/bash_guard.py",
+                base,
+                {"tool_input": {"command": "printf x | rg SECRET"}},
+            )
+
+            self.assertEqual(blocked.returncode, 2, blocked.stderr)
+            self.assertEqual(allowed.returncode, 0, allowed.stderr)
+
     def test_setup_protocol_documents_the_read_side_guard(self):
         protocol = (ROOT / "setup" / "AGENT_SETUP_PROTOCOL.md").read_text()
 
