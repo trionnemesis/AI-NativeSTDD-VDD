@@ -93,8 +93,17 @@ class Word(str):
 
 
 def word_mask(token):
-    """取出 token 的引號遮罩；非 Word（例如切出來的選項值）一律視為未引號。"""
+    """取出 token 的引號遮罩；沒有遮罩的字串一律視為未引號。"""
     return getattr(token, "mask", None) or "." * len(token)
+
+
+def slice_word(token, start):
+    """切出 token[start:] 並保留對應的遮罩片段。
+
+    附著式選項值（--exclude-from="{a,b}/x"、-f"{a,b}/x"）如果丟掉遮罩，
+    引號內的大括號就會被誤展開——遮罩必須跟著切。
+    """
+    return Word(str(token)[start:], word_mask(token)[start:])
 
 
 def split_tokens(segment):
@@ -192,9 +201,12 @@ PREFIX_CHDIR_OPTIONS = {"env": ("C", "--chdir")}
 # bash 的 cd 只接受這些選項（本機 help cd：cd [-L|[-P [-e]] [-@]] [dir]）；
 # 其餘一律是 invalid option，cd 必定失敗。
 CD_OPTIONS = "LPe@"
-# brace expansion 展開上限；超過就退回字面前綴當 scope（見 _resolve），
-# 不能只回傳前 N 條——那會靜默丟掉沒檢查的路徑。
-BRACE_EXPANSION_LIMIT = 256
+# brace expansion 展開上限。上限之內逐條精確判定；超過就整個 word 退回
+# repository scope。先前用「大括號之前的字面前綴」當保守 scope，兩輪之內
+# 產生了三則 finding（前綴切在路徑元件中間、range 語法自己的 .. 被誤判、
+# 後綴的 .. 跳出前綴）——那個啟發式的缺陷率高於它換來的精度，因此移除。
+# 上限拉高到 1024，讓實務上寫得出來的 brace 都落在精確列舉的範圍內。
+BRACE_EXPANSION_LIMIT = 1024
 BRACE_RANGE = re.compile(
     r"^(-?\d+)\.\.(-?\d+)(?:\.\.(-?\d+))?$"
     r"|^([A-Za-z])\.\.([A-Za-z])(?:\.\.(-?\d+))?$"
@@ -209,6 +221,9 @@ HERE_DOCUMENT = re.compile(r"^\d*<<<?(.*)$")
 # 輸出重導向：>file、>>file、2>file。>& 是 fd 複製不是路徑。
 OUTPUT_REDIRECTION = re.compile(r"^\d*>>?(?![&])(.*)$")
 QUOTE_CHARACTERS = "\"'"
+# 雙引號內只有這些字元前面的反斜線會被 shell 吃掉；其餘保留字面。
+# 本機 bash 5.2.21 驗證：printf "%s" "check\\s/x" 印出 check\\s/x。
+DOUBLE_QUOTE_ESCAPES = "$`\"\\\n"
 # [[ ]] 裡的 < 是字串比較，(( )) 裡的是數值比較，都不是重導向。
 # 本機 bash 驗證：[[ app < checks/secret ]] 不讀取任何檔案；
 # [ app < checks/secret ] 則確實重導向，所以只有雙括號形式在此豁免。
@@ -301,7 +316,12 @@ def _quoted_segment(text, index):
     inner = []
     while index < len(text):
         character = text[index]
-        if character == "\\" and quote == '"' and index + 1 < len(text):
+        if (
+            character == "\\"
+            and quote == '"'
+            and index + 1 < len(text)
+            and text[index + 1] in DOUBLE_QUOTE_ESCAPES
+        ):
             inner.append(text[index + 1])
             index += 2
             continue
@@ -431,9 +451,9 @@ def redirection_targets(segment, conditional=0):
 
 def _long_option(token, tokens, index):
     """回傳 (pattern_supplied, file_value, next_index)。"""
-    option, _, attached = token.partition("=")
+    option, separator, attached = str(token).partition("=")
     supplied = option in PATTERN_LONG_OPTIONS
-    value = attached or None
+    value = slice_word(token, len(option) + 1) if separator and attached else None
     if value is None and option in VALUE_LONG_OPTIONS and index < len(tokens):
         value = tokens[index]
         index += 1
@@ -444,7 +464,7 @@ def _short_options(token, tokens, index, options):
     """處理短選項叢集；值可能黏在同一個 token 上（-ePATTERN）或落在下一個 token。"""
     supplied = False
     file_value = None
-    letters = token[1:]
+    letters = str(token)[1:]
     position = 0
     while position < len(letters):
         letter = letters[position]
@@ -454,7 +474,7 @@ def _short_options(token, tokens, index, options):
         supplied = supplied or letter in options["pattern"]
         attached = letters[position:]
         if attached:
-            value = attached
+            value = slice_word(token, position + 1)
         elif index < len(tokens):
             value = tokens[index]
             index += 1
@@ -712,53 +732,15 @@ def expand_braces(text, mask):
     return results, False
 
 
-def _escapes_prefix(text, mask):
-    """展開結果是否可能跳出字面前綴。
-
-    判準是 .. 路徑元件。range 語法本身就帶 ..（{1..300}），那不是路徑元件，
-    因此逐一略過可解析為 range 的大括號內容，其餘部分才納入檢查。
-    """
-    remainder = []
-    index = 0
-    while index < len(text):
-        start = _unquoted_brace(text[index:], mask[index:])
-        if start < 0:
-            remainder.append(text[index:])
-            break
-        start += index
-        remainder.append(text[index:start])
-        end = _brace_close(text, mask, start)
-        if end < 0:
-            remainder.append(text[start:])
-            break
-        body = text[start + 1:end]
-        if _brace_range(body) is None:
-            remainder.append(body)
-        index = end + 1
-    return ".." in "".join(remainder)
-
-
-def capped_scope(text, mask):
-    """展開超過上限時的保守 scope。
-
-    每一條展開結果都在第一個未引號大括號之前的字面前綴底下——除非 word 裡
-    有 .. 路徑元件，那時展開結果可以往上跳出前綴
-    （app/{1..300}/../../checks/secret），只能退回整個 repository。
-    """
-    if _escapes_prefix(text, mask):
-        return "."
-    start = _unquoted_brace(text, mask)
-    return (text[:start] if start > 0 else "") or "."
-
-
 def _resolve(argument, cwds):
     """展開 brace 之後，相對路徑要對每個候選 cwd 各解析一次。"""
     mask = word_mask(argument)
     words, truncated = expand_braces(str(argument), mask)
     if truncated:
-        # 超過展開上限就無法逐一檢查；退回保守 scope 交給
-        # scope_reaches_forbidden 判定，而不是靜默丟掉沒檢查的路徑。
-        words = [capped_scope(str(argument), mask)]
+        # 超過上限就無法逐一檢查。任何比 repository scope 更窄的推測都要求
+        # 「所有展開結果都在某個前綴底下」，而 .. 與切在元件中間的前綴都會
+        # 讓那個前提不成立，因此直接退回整個 repository。
+        words = ["."]
     resolved = []
     for word in words:
         if Path(word).is_absolute():
