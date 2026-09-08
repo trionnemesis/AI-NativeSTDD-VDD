@@ -72,6 +72,8 @@ DIRECTORY_CREATING_COMMANDS = re.compile(
 )
 # 這些字元出現在 cd 的引數裡就無法靜態判定目的地。
 OPAQUE_CD_ARGUMENT = ("$", "`", "~", "*", "?")
+# bash 的 cd 只接受一個 [dir]（本機 help cd：cd [-L|[-P [-e]] [-@]] [dir]）；
+# 多給一個 operand 是 "too many arguments"，工作目錄不會改變。
 
 
 def split_tokens(segment):
@@ -148,6 +150,11 @@ HERE_DOCUMENT = re.compile(r"^\d*<<<?(.*)$")
 # 輸出重導向：>file、>>file、2>file。>& 是 fd 複製不是路徑。
 OUTPUT_REDIRECTION = re.compile(r"^\d*>>?(?![&])(.*)$")
 QUOTE_CHARACTERS = "\"'"
+# [[ ]] 裡的 < 是字串比較，(( )) 裡的是數值比較，都不是重導向。
+# 本機 bash 驗證：[[ app < checks/secret ]] 不讀取任何檔案；
+# [ app < checks/secret ] 則確實重導向，所以只有雙括號形式在此豁免。
+CONDITIONAL_OPENERS = ("[[", "((")
+CONDITIONAL_CLOSERS = ("]]", "))")
 # shell word 的結束字元；重導向目標讀到這些字元就停。
 WORD_TERMINATORS = frozenset(" \t\n\r|;&<>()")
 
@@ -255,6 +262,7 @@ def redirection_targets(segment):
     """
     reads = []
     writes = []
+    conditional = 0
     index = 0
     while index < len(segment):
         character = segment[index]
@@ -264,7 +272,21 @@ def redirection_targets(segment):
         if character in QUOTE_CHARACTERS:
             _, index = _quoted_segment(segment, index)
             continue
+        if any(segment.startswith(opener, index) for opener in CONDITIONAL_OPENERS):
+            conditional += 1
+            index += 2
+            continue
+        if conditional and any(
+            segment.startswith(closer, index) for closer in CONDITIONAL_CLOSERS
+        ):
+            conditional -= 1
+            index += 2
+            continue
         if character not in "<>":
+            index += 1
+            continue
+        if conditional:
+            # 條件式／算術式裡的 < 與 > 是比較運算子。
             index += 1
             continue
         following = segment[index + 1:index + 2]
@@ -330,31 +352,36 @@ def _short_options(token, tokens, index, options):
     return supplied, file_value, index
 
 
-def _has_option(tokens, long_options, short_letters):
+def _has_option(name, tokens, long_options, short_letters):
+    """短選項叢集必須依 arity 掃描：吃值的字母之後全是它的值，不是選項。
+
+    否則 rg -g'*.h' 的 h 會被當成 -h／--help，整個 scope 判定就被跳過。
+    """
+    value_letters = READER_OPTIONS.get(name, NO_VALUE_OPTIONS)["value"]
     for token in tokens:
         if token.split("=", 1)[0] in long_options:
             return True
-        if (
-            short_letters
-            and token.startswith("-")
-            and not token.startswith("--")
-            and any(letter in short_letters for letter in token[1:])
-        ):
-            return True
+        if not short_letters or not token.startswith("-") or token.startswith("--"):
+            continue
+        for letter in token[1:]:
+            if letter in short_letters:
+                return True
+            if letter in value_letters:
+                break
     return False
 
 
 def no_pattern_mode(name, tokens):
     """這次呼叫是否沒有 pattern operand（第一個 positional 就是路徑）。"""
     return _has_option(
-        tokens, NO_PATTERN_LONG_OPTIONS, NO_SEARCH_SHORT_OPTIONS.get(name, "")
+        name, tokens, NO_PATTERN_LONG_OPTIONS, NO_SEARCH_SHORT_OPTIONS.get(name, "")
     )
 
 
 def no_search_mode(name, tokens):
     """這次呼叫是否只印出資訊、完全不讀檔案系統。"""
     return _has_option(
-        tokens, NO_SEARCH_LONG_OPTIONS, NO_SEARCH_SHORT_OPTIONS.get(name, "")
+        name, tokens, NO_SEARCH_LONG_OPTIONS, NO_SEARCH_SHORT_OPTIONS.get(name, "")
     )
 
 
@@ -428,6 +455,22 @@ def implicit_cwd_scope(name, tokens):
     )
 
 
+def cd_destination(tokens):
+    """回傳 cd 的目的地。
+
+    None 代表這個 cd 必定失敗、工作目錄不變（operand 超過一個）；
+    "" 代表目的地無法靜態判定（無 operand、cd -、含變數或萬用字元）。
+    """
+    destinations = path_operands("cd", tokens)
+    if len(destinations) > 1:
+        return None
+    if not destinations or destinations[0] == "-" or any(
+        character in destinations[0] for character in OPAQUE_CD_ARGUMENT
+    ):
+        return ""
+    return destinations[0]
+
+
 def _resolve(argument, cwds):
     """相對路徑要對每個候選 cwd 各解析一次。"""
     if Path(argument).is_absolute():
@@ -463,15 +506,14 @@ def shell_targets(shell_command, root):
         arguments, redirected = redirection_targets(segment)
         name, remaining = segment_command(tokens)
         if name in CD_COMMANDS:
-            destinations = path_operands(name, remaining)
-            opaque = not destinations or destinations[0] == "-" or any(
-                character in destinations[0] for character in OPAQUE_CD_ARGUMENT
-            )
-            if opaque:
+            destination = cd_destination(remaining)
+            if destination is None:
+                # arity 不合法，cd 必定失敗，工作目錄不變。
+                pass
+            elif not destination:
                 success_cwd = root
                 cwds = [root]
             else:
-                destination = destinations[0]
                 success_cwd = success_cwd / destination
                 candidates = [success_cwd, root] if may_create else []
                 for candidate in cwds:

@@ -1675,6 +1675,92 @@ class HookTests(unittest.TestCase):
             self.assertIn("重導向寫入", violations)
             self.assertNotIn("讀取", violations)
 
+    def test_bash_guard_treats_invalid_cd_arity_as_failure(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            base = Path(tmp)
+            write_policy(base, implementation_roots=["app"], test_roots=["checks"])
+            (base / "app").mkdir()
+            (base / "checks").mkdir()
+            (base / ".vdd" / "phase").write_text("RED_VERIFIED")
+
+            # bash 的 cd 只接受一個 [dir]；cd app extra 是 too many arguments，
+            # shell 留在 repository root，相對路徑就落在測試側
+            blocked = run_hook(
+                ".claude/hooks/bash_guard.py",
+                base,
+                {"tool_input": {"command": "cd app extra || cat checks/secret"}},
+            )
+            allowed = run_hook(
+                ".claude/hooks/bash_guard.py",
+                base,
+                {"tool_input": {"command": "cd app && cat login.py"}},
+            )
+
+            self.assertEqual(blocked.returncode, 2, blocked.stderr)
+            self.assertEqual(allowed.returncode, 0, allowed.stderr)
+
+    def test_bash_guard_respects_short_option_arity_in_mode_detection(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            base = Path(tmp)
+            write_policy(base, implementation_roots=["app"], test_roots=["checks"])
+            (base / "app").mkdir()
+            (base / "checks").mkdir()
+            (base / ".vdd" / "phase").write_text("RED_VERIFIED")
+
+            # -g 的值黏在同一個 token，值裡的 h 不是 --help
+            for command in ("rg -g'*.h' SECRET", "rg -g '*.h' SECRET"):
+                with self.subTest(blocked=command):
+                    result = run_hook(
+                        ".claude/hooks/bash_guard.py",
+                        base,
+                        {"tool_input": {"command": command}},
+                    )
+                    self.assertEqual(result.returncode, 2, result.stderr)
+
+            # 真正的 -h／-nh 仍然是 help，不施加 cwd scope
+            for command in ("rg -h", "rg -nh", "rg -g'*.h' SECRET app"):
+                with self.subTest(allowed=command):
+                    result = run_hook(
+                        ".claude/hooks/bash_guard.py",
+                        base,
+                        {"tool_input": {"command": command}},
+                    )
+                    self.assertEqual(result.returncode, 0, result.stderr)
+
+    def test_bash_guard_skips_comparison_operators_in_conditionals(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            base = Path(tmp)
+            write_policy(base, implementation_roots=["app"], test_roots=["checks"])
+            (base / "app").mkdir()
+            (base / "checks").mkdir()
+            (base / ".vdd" / "phase").write_text("RED_VERIFIED")
+
+            # [[ ]] 與 (( )) 裡的 < 是比較運算子，不讀取檔案
+            for command in (
+                "[[ app < checks/secret ]]",
+                "(( 1 < 2 )) && cat app/x.py",
+            ):
+                with self.subTest(allowed=command):
+                    result = run_hook(
+                        ".claude/hooks/bash_guard.py",
+                        base,
+                        {"tool_input": {"command": command}},
+                    )
+                    self.assertEqual(result.returncode, 0, result.stderr)
+
+            # 單括號的 [ ] 裡 bash 仍會重導向，條件式之外的重導向也照擋
+            for command in (
+                "[ app < checks/secret ]",
+                "[[ 1 -lt 2 ]] && cat < checks/secret",
+            ):
+                with self.subTest(blocked=command):
+                    result = run_hook(
+                        ".claude/hooks/bash_guard.py",
+                        base,
+                        {"tool_input": {"command": command}},
+                    )
+                    self.assertEqual(result.returncode, 2, result.stderr)
+
     def test_setup_protocol_documents_the_read_side_guard(self):
         protocol = (ROOT / "setup" / "AGENT_SETUP_PROTOCOL.md").read_text()
 
