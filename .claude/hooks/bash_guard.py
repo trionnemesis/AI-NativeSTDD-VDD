@@ -147,8 +147,9 @@ PREFIX_CHDIR_OPTIONS = {"env": ("C", "--chdir")}
 # bash 的 cd 只接受這些選項（本機 help cd：cd [-L|[-P [-e]] [-@]] [dir]）；
 # 其餘一律是 invalid option，cd 必定失敗。
 CD_OPTIONS = "LPe@"
-# brace expansion 展開上限；超過就原樣保留，避免 {1..100000} 這種輸入炸開。
-BRACE_EXPANSION_LIMIT = 64
+# brace expansion 展開上限；超過就退回字面前綴當 scope（見 _resolve），
+# 不能只回傳前 N 條——那會靜默丟掉沒檢查的路徑。
+BRACE_EXPANSION_LIMIT = 256
 BRACE_RANGE = re.compile(
     r"^(-?\d+)\.\.(-?\d+)(?:\.\.(-?\d+))?$|^([A-Za-z])\.\.([A-Za-z])$"
 )
@@ -167,6 +168,8 @@ QUOTE_CHARACTERS = "\"'"
 # [ app < checks/secret ] 則確實重導向，所以只有雙括號形式在此豁免。
 CONDITIONAL_OPENERS = ("[[", "((")
 CONDITIONAL_CLOSERS = ("]]", "))")
+# 只有出現在命令位置的 [[ ／(( 才會開啟條件式；echo [[ 的 [[ 只是引數。
+CONTROL_KEYWORDS = ("if", "elif", "while", "until", "then", "do", "else")
 # shell word 的結束字元；重導向目標讀到這些字元就停。
 WORD_TERMINATORS = frozenset(" \t\n\r|;&<>()")
 
@@ -285,6 +288,29 @@ def _read_word(text, index):
     return "".join(word), index
 
 
+def command_position(segment):
+    """回傳 segment 中命令字的起始位置（跳過空白、! 與控制關鍵字）。"""
+    index = 0
+    while index < len(segment):
+        if segment[index] in " \t!":
+            index += 1
+            continue
+        if segment[index] == "(" and not segment.startswith("((", index):
+            # 單一 ( 是 subshell；(( 本身就是算術式的開頭，不能跳過。
+            index += 1
+            continue
+        for keyword in CONTROL_KEYWORDS:
+            end = index + len(keyword)
+            if segment.startswith(keyword, index) and (
+                end >= len(segment) or segment[end] in " \t"
+            ):
+                index = end
+                break
+        else:
+            break
+    return index
+
+
 def redirection_targets(segment, conditional=0):
     """回傳 (讀取目標, 寫入目標, 結束時的條件式深度)。
 
@@ -294,6 +320,7 @@ def redirection_targets(segment, conditional=0):
     """
     reads = []
     writes = []
+    opener_position = command_position(segment)
     index = 0
     while index < len(segment):
         character = segment[index]
@@ -303,7 +330,10 @@ def redirection_targets(segment, conditional=0):
         if character in QUOTE_CHARACTERS:
             _, index = _quoted_segment(segment, index)
             continue
-        if any(segment.startswith(opener, index) for opener in CONDITIONAL_OPENERS):
+        if (conditional or index == opener_position) and any(
+            segment.startswith(opener, index) for opener in CONDITIONAL_OPENERS
+        ):
+            # 已在條件式內就允許巢狀（[[:alpha:]] 之類），否則只認命令位置。
             conditional += 1
             index += 2
             continue
@@ -542,57 +572,120 @@ def _brace_alternatives(body):
     return parts
 
 
+def _padded(value, width):
+    """依 bash 的零填充規則格式化 range 值。"""
+    if not width:
+        return str(value)
+    sign = "-" if value < 0 else ""
+    return sign + str(abs(value)).rjust(width - len(sign), "0")
+
+
 def _brace_range(body):
     """{1..3}／{a..c}／{1..9..2} 的展開值；不是 range 就回傳 None。"""
     match = BRACE_RANGE.match(body)
     if match is None:
         return None
     if match.group(1) is not None:
-        start, end = int(match.group(1)), int(match.group(2))
+        first, last = match.group(1), match.group(2)
+        start, end = int(first), int(last)
         step = abs(int(match.group(3))) if match.group(3) else 1
-        values = range(start, end + (1 if end >= start else -1), (1 if end >= start else -1) * (step or 1))
-        return [str(value) for value in values]
+        direction = 1 if end >= start else -1
+        # 端點有前導零時 bash 會把結果補到相同寬度：{01..03} → 01 02 03。
+        # 轉成 int 再轉回字串會把填充洗掉，checks{01..03} 就變成 checks1。
+        padded = any(
+            item.lstrip("-").startswith("0") and len(item.lstrip("-")) > 1
+            for item in (first, last)
+        )
+        width = max(len(first), len(last)) if padded else 0
+        values = range(start, end + direction, direction * (step or 1))
+        return [_padded(value, width) for value in values]
     start, end = ord(match.group(4)), ord(match.group(5))
     direction = 1 if end >= start else -1
     return [chr(value) for value in range(start, end + direction, direction)]
 
 
 def expand_braces(word):
-    """展開靜態可判定的 brace expression。
+    """展開靜態可判定的 brace expression，回傳 (展開結果, 是否被上限截斷)。
 
     bash 的 cat {app,checks}/secret 會讀取兩個檔案，只看字面字串會分類成 other。
-    無法靜態展開（沒有配對括號、不是 alternation 也不是 range、超過上限）
-    時原樣保留，與 bash 的行為一致。
+    沒有配對括號、既不是 alternation 也不是 range 時原樣保留，與 bash 一致。
+    超過上限時回報截斷，由呼叫端改用保守判定——只回傳前 N 條等於
+    靜默放行沒檢查到的路徑。
     """
     start = word.find("{")
     if start < 0:
-        return [word]
+        return [word], False
     body, after = _brace_body(word, start)
     if body is None:
-        return [word]
+        return [word], False
     alternatives = _brace_alternatives(body)
     if len(alternatives) == 1:
         alternatives = _brace_range(body)
         if alternatives is None:
             # bash 對這種大括號原樣保留，只繼續展開後面的部分。
-            head = word[:after]
-            return [head + tail for tail in expand_braces(word[after:])][
-                :BRACE_EXPANSION_LIMIT
-            ]
+            tails, truncated = expand_braces(word[after:])
+            return [word[:after] + tail for tail in tails], truncated
     prefix = word[:start]
     results = []
     for alternative in alternatives:
-        for expanded in expand_braces(alternative + word[after:]):
-            results.append(prefix + expanded)
-            if len(results) >= BRACE_EXPANSION_LIMIT:
-                return results
-    return results
+        expanded, truncated = expand_braces(alternative + word[after:])
+        if truncated:
+            return results, True
+        for item in expanded:
+            results.append(prefix + item)
+            if len(results) > BRACE_EXPANSION_LIMIT:
+                return results, True
+    return results, False
 
 
-def _resolve(argument, cwds):
+def literal_brace_words(segment):
+    """回傳大括號被引號包住的 word——bash 不會對它們做 brace expansion。
+
+    只看 shlex 的 token 是分不出來的：引號在那之前就被拿掉了，
+    cat '{app,checks}/secret' 會被誤展開成兩條路徑並誤擋。
+    部分引號（{app,"checks"}）的大括號本身沒被引，bash 仍會展開。
+    """
+    literal = set()
+    index = 0
+    length = len(segment)
+    while index < length:
+        while index < length and segment[index] in " \t\n\r":
+            index += 1
+        if index >= length:
+            break
+        word = []
+        quoted_brace = False
+        while index < length and segment[index] not in " \t\n\r":
+            character = segment[index]
+            if character == "\\" and index + 1 < length:
+                quoted_brace = quoted_brace or segment[index + 1] in "{}"
+                word.append(segment[index + 1])
+                index += 2
+                continue
+            if character in QUOTE_CHARACTERS:
+                inner, index = _quoted_segment(segment, index)
+                quoted_brace = quoted_brace or any(item in "{}" for item in inner)
+                word.append(inner)
+                continue
+            word.append(character)
+            index += 1
+        if quoted_brace:
+            literal.add("".join(word))
+    return literal
+
+
+def _resolve(argument, cwds, literal_words=frozenset()):
     """展開 brace 之後，相對路徑要對每個候選 cwd 各解析一次。"""
+    if argument in literal_words:
+        words, truncated = [argument], False
+    else:
+        words, truncated = expand_braces(argument)
+    if truncated:
+        # 超過展開上限就無法逐一檢查；退回大括號之前的字面前綴當作 scope，
+        # 交給 scope_reaches_forbidden 判定，而不是靜默丟掉沒檢查的路徑。
+        words = [argument.split("{", 1)[0] or "."]
     resolved = []
-    for word in expand_braces(argument):
+    for word in words:
         if Path(word).is_absolute():
             resolved.append(word)
             continue
@@ -651,8 +744,11 @@ def shell_targets(shell_command, root):
         tokens = split_tokens(segment)
         # 重導向可能出現在命令名之前（<file cat），所以掃整個 segment。
         # 重導向讓任何命令都讀得到檔案，與命令是不是 reader 無關。
-        arguments, redirected, conditional = redirection_targets(segment, conditional)
+        redirect_reads, redirect_writes, conditional = redirection_targets(
+            segment, conditional
+        )
         name, remaining, chdir = segment_command(tokens)
+        operands = []
         if name in CD_COMMANDS:
             destination = cd_destination(remaining)
             if destination is None:
@@ -665,16 +761,39 @@ def shell_targets(shell_command, root):
                 success_cwd = success_cwd / destination
                 cwds = advance(cwds, destination, may_create, [success_cwd, root])
         elif name in READ_COMMANDS:
-            arguments += path_operands(name, remaining)
-        if not arguments and not piped and implicit_cwd_scope(name, remaining):
+            operands = path_operands(name, remaining)
+        if (
+            not operands
+            and not redirect_reads
+            and not piped
+            and implicit_cwd_scope(name, remaining)
+        ):
             # 這些 reader 不帶路徑時遞迴搜尋 cwd，那就是這次搜尋的 scope。
-            arguments = ["."]
+            operands = ["."]
         # prefix 造成的 chdir 只影響這一個命令，不改變後續 segment 的 cwd。
-        segment_cwds = advance(cwds, chdir, may_create) if chdir else cwds
-        for argument in arguments:
-            targets.extend(_resolve(argument, segment_cwds))
-        for argument in redirected:
-            written.extend(_resolve(argument, segment_cwds))
+        segment_cwds = cwds
+        if chdir:
+            reached = [
+                candidate / chdir
+                for candidate in cwds
+                if (candidate / chdir).is_dir()
+            ]
+            if reached:
+                segment_cwds = reached
+            elif may_create:
+                segment_cwds = advance(cwds, chdir, may_create)
+            else:
+                # env -C 的目的地不存在時 env 直接失敗，被包裝的命令不會執行，
+                # operand 一個都不會被讀到。重導向仍由 shell 先做，所以保留。
+                operands = []
+        literal_words = literal_brace_words(segment)
+        for argument in operands:
+            targets.extend(_resolve(argument, segment_cwds, literal_words))
+        # 重導向由 shell 在自己的 cwd 完成，不受 prefix chdir 影響。
+        for argument in redirect_reads:
+            targets.extend(_resolve(argument, cwds, literal_words))
+        for argument in redirect_writes:
+            written.extend(_resolve(argument, cwds, literal_words))
     return targets, written
 
 
