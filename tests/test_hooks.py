@@ -2009,6 +2009,90 @@ class HookTests(unittest.TestCase):
 
             self.assertEqual(allowed.returncode, 0, allowed.stderr)
 
+    def test_bash_guard_expands_stepped_alphabetic_ranges(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            base = Path(tmp)
+            write_policy(base, implementation_roots=["app"], test_roots=["tests"])
+            (base / "app").mkdir()
+            (base / "tests").mkdir()
+            (base / ".vdd" / "phase").write_text("RED_VERIFIED")
+
+            # bash 的 {q..u..2} 展開為 q s u，中間那條就是隔離側
+            for command in ("cat test{q..u..2}/secret", "cat test{q..s}/secret"):
+                with self.subTest(blocked=command):
+                    result = run_hook(
+                        ".claude/hooks/bash_guard.py",
+                        base,
+                        {"tool_input": {"command": command}},
+                    )
+                    self.assertEqual(result.returncode, 2, result.stderr)
+
+            allowed = run_hook(
+                ".claude/hooks/bash_guard.py",
+                base,
+                {"tool_input": {"command": "cat app/x{a..c}"}},
+            )
+            self.assertEqual(allowed.returncode, 0, allowed.stderr)
+
+    def test_bash_guard_capped_scope_accounts_for_traversal(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            base = Path(tmp)
+            write_policy(base, implementation_roots=["app"], test_roots=["checks"])
+            (base / "app").mkdir()
+            (base / "checks").mkdir()
+            (base / ".vdd" / "phase").write_text("RED_VERIFIED")
+
+            alternatives = ",".join(f"app/x{index}" for index in range(300))
+            # 展開超過上限時，字面前綴只有在展開結果不會往上跳時才夠保守
+            for command in (
+                "cat app/{1..300}/../../checks/secret",
+                f"cat {{{alternatives},../checks/secret}}",
+            ):
+                with self.subTest(blocked=command):
+                    result = run_hook(
+                        ".claude/hooks/bash_guard.py",
+                        base,
+                        {"tool_input": {"command": command}},
+                    )
+                    self.assertEqual(result.returncode, 2, result.stderr)
+
+            # range 語法自己的 .. 不是路徑元件，不得因此退回整個 repository
+            allowed = run_hook(
+                ".claude/hooks/bash_guard.py",
+                base,
+                {"tool_input": {"command": "cat app/{1..300}/x"}},
+            )
+            self.assertEqual(allowed.returncode, 0, allowed.stderr)
+
+    def test_bash_guard_expands_unquoted_braces_in_mixed_words(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            base = Path(tmp)
+            write_policy(base, implementation_roots=["app"], test_roots=["checks"])
+            (base / "app").mkdir()
+            (base / "checks").mkdir()
+            (base / ".vdd" / "phase").write_text("RED_VERIFIED")
+
+            # 後綴的 {} 被引號包住，但前面的 alternation 沒有，bash 仍會展開
+            blocked = run_hook(
+                ".claude/hooks/bash_guard.py",
+                base,
+                {"tool_input": {"command": "cat {app,checks}/secret'{}'"}},
+            )
+            # 大括號本身被引號包住時才是字面路徑；重導向目標走同一套遮罩
+            for command in (
+                "cat '{app,checks}/secret'",
+                "cat < '{app,checks}/secret'",
+            ):
+                with self.subTest(allowed=command):
+                    result = run_hook(
+                        ".claude/hooks/bash_guard.py",
+                        base,
+                        {"tool_input": {"command": command}},
+                    )
+                    self.assertEqual(result.returncode, 0, result.stderr)
+
+            self.assertEqual(blocked.returncode, 2, blocked.stderr)
+
     def test_setup_protocol_documents_the_read_side_guard(self):
         protocol = (ROOT / "setup" / "AGENT_SETUP_PROTOCOL.md").read_text()
 

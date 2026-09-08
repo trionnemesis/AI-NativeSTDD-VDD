@@ -5,7 +5,6 @@
 import json
 import os
 import re
-import shlex
 import sys
 from pathlib import Path, PurePosixPath
 
@@ -76,11 +75,57 @@ OPAQUE_CD_ARGUMENT = ("$", "`", "~", "*", "?")
 # 多給一個 operand 是 "too many arguments"，工作目錄不會改變。
 
 
+class Word(str):
+    """cooked 之後的 token，額外帶著引號遮罩。
+
+    mask 與字串等長，"q" 代表該字元來自引號或跳脫。brace expansion 必須
+    看得到這個資訊：bash 只展開沒被引號包住的大括號，而任何先 cook 再判斷的
+    做法都已經把它丟掉了。這是本 guard 第三次因為引號資訊在錯誤的階段消失
+    而出錯，所以改為讓 token 自己帶著。
+    """
+
+    __slots__ = ("mask",)
+
+    def __new__(cls, text, mask):
+        word = super().__new__(cls, text)
+        word.mask = mask
+        return word
+
+
+def word_mask(token):
+    """取出 token 的引號遮罩；非 Word（例如切出來的選項值）一律視為未引號。"""
+    return getattr(token, "mask", None) or "." * len(token)
+
+
 def split_tokens(segment):
-    try:
-        return shlex.split(segment)
-    except ValueError:
-        return segment.split()
+    """把 segment 切成 Word；引號與跳脫在此 cook，遮罩同時建立。"""
+    words = []
+    index = 0
+    length = len(segment)
+    while index < length:
+        while index < length and segment[index] in " \t\n\r":
+            index += 1
+        if index >= length:
+            break
+        text = []
+        mask = []
+        while index < length and segment[index] not in " \t\n\r":
+            character = segment[index]
+            if character == "\\" and index + 1 < length:
+                text.append(segment[index + 1])
+                mask.append("q")
+                index += 2
+                continue
+            if character in QUOTE_CHARACTERS:
+                inner, index = _quoted_segment(segment, index)
+                text.append(inner)
+                mask.append("q" * len(inner))
+                continue
+            text.append(character)
+            mask.append(".")
+            index += 1
+        words.append(Word("".join(text), "".join(mask)))
+    return words
 
 
 # grep/rg/ag 的第一個 positional 是 PATTERN，sed 是 script，awk 是程式碼——都不是路徑。
@@ -151,7 +196,8 @@ CD_OPTIONS = "LPe@"
 # 不能只回傳前 N 條——那會靜默丟掉沒檢查的路徑。
 BRACE_EXPANSION_LIMIT = 256
 BRACE_RANGE = re.compile(
-    r"^(-?\d+)\.\.(-?\d+)(?:\.\.(-?\d+))?$|^([A-Za-z])\.\.([A-Za-z])$"
+    r"^(-?\d+)\.\.(-?\d+)(?:\.\.(-?\d+))?$"
+    r"|^([A-Za-z])\.\.([A-Za-z])(?:\.\.(-?\d+))?$"
 )
 GROUPING_CHARACTERS = "({!"
 # 輸入重導向：<file、0<file、<>file（讀寫）。
@@ -267,25 +313,32 @@ def _quoted_segment(text, index):
 
 
 def _read_word(text, index):
-    """從 index 讀出一個 shell word（去掉引號），回傳 (word, next_index)。"""
+    """從 index 讀出一個 shell word（去掉引號），回傳 (Word, next_index)。
+
+    重導向目標與 operand 走同一套引號遮罩，`cat < '{a,b}'` 才不會被誤展開。
+    """
     while index < len(text) and text[index] in " \t":
         index += 1
     word = []
+    mask = []
     while index < len(text):
         character = text[index]
         if character == "\\" and index + 1 < len(text):
             word.append(text[index + 1])
+            mask.append("q")
             index += 2
             continue
         if character in QUOTE_CHARACTERS:
             inner, index = _quoted_segment(text, index)
             word.append(inner)
+            mask.append("q" * len(inner))
             continue
         if character in WORD_TERMINATORS:
             break
         word.append(character)
+        mask.append(".")
         index += 1
-    return "".join(word), index
+    return Word("".join(word), "".join(mask)), index
 
 
 def command_position(segment):
@@ -540,35 +593,46 @@ def cd_destination(tokens):
     return destinations[0]
 
 
-def _brace_body(text, start):
-    """回傳 (大括號內容, 右括號之後的位置)；沒有配對的右括號回傳 (None, start)。"""
+def _unquoted_brace(text, mask):
+    """第一個未被引號包住的左大括號位置；沒有就回傳 -1。"""
+    for index, character in enumerate(text):
+        if character == "{" and mask[index] == ".":
+            return index
+    return -1
+
+
+def _brace_close(text, mask, start):
+    """與 start 配對的右大括號位置；沒有配對就回傳 -1。"""
     depth = 0
     for index in range(start, len(text)):
+        if mask[index] != ".":
+            continue
         if text[index] == "{":
             depth += 1
         elif text[index] == "}":
             depth -= 1
             if depth == 0:
-                return text[start + 1:index], index + 1
-    return None, start
+                return index
+    return -1
 
 
-def _brace_alternatives(body):
-    """依最外層逗號切開；巢狀大括號內的逗號不切。"""
+def _brace_alternatives(text, mask, start, end):
+    """依最外層未被引號包住的逗號切開，回傳 [(text, mask)]。"""
     parts = []
     depth = 0
-    current = []
-    for character in body:
+    piece = start + 1
+    for index in range(start + 1, end):
+        if mask[index] != ".":
+            continue
+        character = text[index]
         if character == "{":
             depth += 1
         elif character == "}":
             depth -= 1
         elif character == "," and depth == 0:
-            parts.append("".join(current))
-            current = []
-            continue
-        current.append(character)
-    parts.append("".join(current))
+            parts.append((text[piece:index], mask[piece:index]))
+            piece = index + 1
+    parts.append((text[piece:end], mask[piece:end]))
     return parts
 
 
@@ -599,36 +663,46 @@ def _brace_range(body):
         width = max(len(first), len(last)) if padded else 0
         values = range(start, end + direction, direction * (step or 1))
         return [_padded(value, width) for value in values]
+    # 字母 range 同樣接受 step：bash 的 {q..u..2} 展開為 q s u。
     start, end = ord(match.group(4)), ord(match.group(5))
+    step = abs(int(match.group(6))) if match.group(6) else 1
     direction = 1 if end >= start else -1
-    return [chr(value) for value in range(start, end + direction, direction)]
+    values = range(start, end + direction, direction * (step or 1))
+    return [chr(value) for value in values]
 
 
-def expand_braces(word):
+def expand_braces(text, mask):
     """展開靜態可判定的 brace expression，回傳 (展開結果, 是否被上限截斷)。
 
     bash 的 cat {app,checks}/secret 會讀取兩個檔案，只看字面字串會分類成 other。
+    只展開遮罩標為未引號的大括號——bash 不展開 '{a,b}'，但對
+    {a,"b"} 這種只有內容被引的仍然展開，所以粒度必須是「大括號字元本身」。
     沒有配對括號、既不是 alternation 也不是 range 時原樣保留，與 bash 一致。
     超過上限時回報截斷，由呼叫端改用保守判定——只回傳前 N 條等於
     靜默放行沒檢查到的路徑。
     """
-    start = word.find("{")
+    start = _unquoted_brace(text, mask)
     if start < 0:
-        return [word], False
-    body, after = _brace_body(word, start)
-    if body is None:
-        return [word], False
-    alternatives = _brace_alternatives(body)
+        return [text], False
+    end = _brace_close(text, mask, start)
+    if end < 0:
+        return [text], False
+    alternatives = _brace_alternatives(text, mask, start, end)
     if len(alternatives) == 1:
-        alternatives = _brace_range(body)
-        if alternatives is None:
+        body_text, body_mask = alternatives[0]
+        values = _brace_range(body_text) if "q" not in body_mask else None
+        if values is None:
             # bash 對這種大括號原樣保留，只繼續展開後面的部分。
-            tails, truncated = expand_braces(word[after:])
-            return [word[:after] + tail for tail in tails], truncated
-    prefix = word[:start]
+            tails, truncated = expand_braces(text[end + 1:], mask[end + 1:])
+            return [text[:end + 1] + tail for tail in tails], truncated
+        alternatives = [(value, "." * len(value)) for value in values]
+    prefix = text[:start]
+    suffix_text, suffix_mask = text[end + 1:], mask[end + 1:]
     results = []
-    for alternative in alternatives:
-        expanded, truncated = expand_braces(alternative + word[after:])
+    for alternative_text, alternative_mask in alternatives:
+        expanded, truncated = expand_braces(
+            alternative_text + suffix_text, alternative_mask + suffix_mask
+        )
         if truncated:
             return results, True
         for item in expanded:
@@ -638,52 +712,53 @@ def expand_braces(word):
     return results, False
 
 
-def literal_brace_words(segment):
-    """回傳大括號被引號包住的 word——bash 不會對它們做 brace expansion。
+def _escapes_prefix(text, mask):
+    """展開結果是否可能跳出字面前綴。
 
-    只看 shlex 的 token 是分不出來的：引號在那之前就被拿掉了，
-    cat '{app,checks}/secret' 會被誤展開成兩條路徑並誤擋。
-    部分引號（{app,"checks"}）的大括號本身沒被引，bash 仍會展開。
+    判準是 .. 路徑元件。range 語法本身就帶 ..（{1..300}），那不是路徑元件，
+    因此逐一略過可解析為 range 的大括號內容，其餘部分才納入檢查。
     """
-    literal = set()
+    remainder = []
     index = 0
-    length = len(segment)
-    while index < length:
-        while index < length and segment[index] in " \t\n\r":
-            index += 1
-        if index >= length:
+    while index < len(text):
+        start = _unquoted_brace(text[index:], mask[index:])
+        if start < 0:
+            remainder.append(text[index:])
             break
-        word = []
-        quoted_brace = False
-        while index < length and segment[index] not in " \t\n\r":
-            character = segment[index]
-            if character == "\\" and index + 1 < length:
-                quoted_brace = quoted_brace or segment[index + 1] in "{}"
-                word.append(segment[index + 1])
-                index += 2
-                continue
-            if character in QUOTE_CHARACTERS:
-                inner, index = _quoted_segment(segment, index)
-                quoted_brace = quoted_brace or any(item in "{}" for item in inner)
-                word.append(inner)
-                continue
-            word.append(character)
-            index += 1
-        if quoted_brace:
-            literal.add("".join(word))
-    return literal
+        start += index
+        remainder.append(text[index:start])
+        end = _brace_close(text, mask, start)
+        if end < 0:
+            remainder.append(text[start:])
+            break
+        body = text[start + 1:end]
+        if _brace_range(body) is None:
+            remainder.append(body)
+        index = end + 1
+    return ".." in "".join(remainder)
 
 
-def _resolve(argument, cwds, literal_words=frozenset()):
+def capped_scope(text, mask):
+    """展開超過上限時的保守 scope。
+
+    每一條展開結果都在第一個未引號大括號之前的字面前綴底下——除非 word 裡
+    有 .. 路徑元件，那時展開結果可以往上跳出前綴
+    （app/{1..300}/../../checks/secret），只能退回整個 repository。
+    """
+    if _escapes_prefix(text, mask):
+        return "."
+    start = _unquoted_brace(text, mask)
+    return (text[:start] if start > 0 else "") or "."
+
+
+def _resolve(argument, cwds):
     """展開 brace 之後，相對路徑要對每個候選 cwd 各解析一次。"""
-    if argument in literal_words:
-        words, truncated = [argument], False
-    else:
-        words, truncated = expand_braces(argument)
+    mask = word_mask(argument)
+    words, truncated = expand_braces(str(argument), mask)
     if truncated:
-        # 超過展開上限就無法逐一檢查；退回大括號之前的字面前綴當作 scope，
-        # 交給 scope_reaches_forbidden 判定，而不是靜默丟掉沒檢查的路徑。
-        words = [argument.split("{", 1)[0] or "."]
+        # 超過展開上限就無法逐一檢查；退回保守 scope 交給
+        # scope_reaches_forbidden 判定，而不是靜默丟掉沒檢查的路徑。
+        words = [capped_scope(str(argument), mask)]
     resolved = []
     for word in words:
         if Path(word).is_absolute():
@@ -786,14 +861,13 @@ def shell_targets(shell_command, root):
                 # env -C 的目的地不存在時 env 直接失敗，被包裝的命令不會執行，
                 # operand 一個都不會被讀到。重導向仍由 shell 先做，所以保留。
                 operands = []
-        literal_words = literal_brace_words(segment)
         for argument in operands:
-            targets.extend(_resolve(argument, segment_cwds, literal_words))
+            targets.extend(_resolve(argument, segment_cwds))
         # 重導向由 shell 在自己的 cwd 完成，不受 prefix chdir 影響。
         for argument in redirect_reads:
-            targets.extend(_resolve(argument, cwds, literal_words))
+            targets.extend(_resolve(argument, cwds))
         for argument in redirect_writes:
-            written.extend(_resolve(argument, cwds, literal_words))
+            written.extend(_resolve(argument, cwds))
     return targets, written
 
 
