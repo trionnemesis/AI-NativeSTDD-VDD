@@ -1022,6 +1022,72 @@ class HookTests(unittest.TestCase):
             )
             self.assertEqual(allowed.returncode, 0, allowed.stderr)
 
+    def test_classify_path_uses_the_longest_matching_root(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            base = Path(tmp)
+            write_policy(
+                base,
+                implementation_roots=["project/src"],
+                protected_spec_roots=["project"],
+                test_roots=["checks"],
+            )
+            (base / "project" / "src").mkdir(parents=True)
+            (base / "project" / "src" / "secret.py").write_text("s\n")
+            (base / "project" / "specs").mkdir()
+            (base / "project" / "specs" / "a.feature").write_text("f\n")
+            (base / ".vdd" / "phase").write_text("INIT")
+
+            # implementation_roots 巢狀在 protected_spec_roots 底下時，
+            # 固定的類別優先權會把整個實作側判成永遠可讀的 spec。
+            blocked = run_hook(
+                ".claude/hooks/read_isolation_guard.py",
+                base,
+                {
+                    "tool_name": "Read",
+                    "tool_input": {"file_path": "project/src/secret.py"},
+                },
+            )
+            spec_still_readable = run_hook(
+                ".claude/hooks/read_isolation_guard.py",
+                base,
+                {
+                    "tool_name": "Read",
+                    "tool_input": {"file_path": "project/specs/a.feature"},
+                },
+            )
+
+            self.assertEqual(blocked.returncode, 2, blocked.stderr)
+            self.assertEqual(spec_still_readable.returncode, 0, spec_still_readable.stderr)
+
+    def test_merge_settings_refuses_to_write_through_a_symlink(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            base = Path(tmp)
+            target = base / "target" / ".claude"
+            target.mkdir(parents=True)
+            outside = base / "outside"
+            outside.mkdir()
+            elsewhere = outside / "global-settings.json"
+            elsewhere.write_text(json.dumps({"hooks": {}}))
+            settings_path = target / "settings.json"
+            settings_path.symlink_to(elsewhere)
+
+            result = subprocess.run(
+                [
+                    sys.executable,
+                    str(ROOT / "setup" / "merge_settings.py"),
+                    str(settings_path),
+                    str(ROOT / ".claude" / "settings.json"),
+                ],
+                capture_output=True,
+                text=True,
+                check=False,
+            )
+
+            self.assertEqual(result.returncode, 1, result.stdout)
+            self.assertIn("symlink", result.stderr)
+            # 指向 target 之外的檔案不得被改動
+            self.assertEqual(json.loads(elsewhere.read_text()), {"hooks": {}})
+
     def test_setup_protocol_documents_the_read_side_guard(self):
         protocol = (ROOT / "setup" / "AGENT_SETUP_PROTOCOL.md").read_text()
 

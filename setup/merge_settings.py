@@ -41,7 +41,24 @@ def merge_event(target_entries, template_entries):
     return added
 
 
+def ensure_local(target_path: Path) -> None:
+    """Refuse to write through a symlinked settings file.
+
+    `.claude/settings.json`（或其父目錄）若是 symlink，write_text 會寫穿到 target
+    以外的檔案，把別的專案或全域設定改掉。init.sh 已拒絕 symlink 化的控制目錄，
+    這裡補上檔案本身。
+    """
+    project = target_path.parent.parent
+    if target_path.is_symlink():
+        raise ValueError(f"{target_path} is a symlink; refusing to write through it")
+    try:
+        target_path.resolve().relative_to(project.resolve())
+    except (OSError, RuntimeError, ValueError) as exc:
+        raise ValueError(f"{target_path} resolves outside {project}") from exc
+
+
 def merge(target_path: Path, template_path: Path) -> int:
+    ensure_local(target_path)
     target = json.loads(target_path.read_text(encoding="utf-8"))
     template = json.loads(template_path.read_text(encoding="utf-8"))
     target_hooks = target.setdefault("hooks", {})
@@ -62,7 +79,7 @@ def main() -> int:
     arguments = parser.parse_args()
     try:
         added = merge(arguments.target, arguments.template)
-    except (OSError, UnicodeError, json.JSONDecodeError) as exc:
+    except (OSError, UnicodeError, ValueError, json.JSONDecodeError) as exc:
         print(f"ERROR: cannot merge settings: {exc}", file=sys.stderr)
         return 1
     print(f"merged {added} missing hook registration(s)")

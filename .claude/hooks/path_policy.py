@@ -278,14 +278,28 @@ def classify_path(raw_path: str, policy: dict[str, Any]) -> str:
     guessing layout from framework heuristics — otherwise a document such as
     docs/02-canonical-spec.md would be treated as a test by the *spec* pattern.
     """
-    if path_in_roots(raw_path, policy["protected_spec_roots"]):
-        return "spec"
-    if path_in_roots(raw_path, policy["test_roots"]):
-        return "test"
-    if path_in_roots(raw_path, policy["implementation_roots"]):
+    relative = repo_relative_path(raw_path)
+    if relative is None:
+        return "other"
+    # Longest matching root wins. Fixed category precedence would let a policy such as
+    # protected_spec_roots=["project"] with implementation_roots=["project/src"] classify
+    # every implementation file as always-readable spec.
+    best_kind: str | None = None
+    best_length = -1
+    for kind, roots in (
+        ("spec", policy["protected_spec_roots"]),
+        ("test", policy["test_roots"]),
+        ("implementation", policy["implementation_roots"]),
+    ):
+        for root in roots:
+            if relative != root and not relative.startswith(f"{root}/"):
+                continue
+            if len(root) > best_length:
+                best_kind, best_length = kind, len(root)
+    if best_kind == "implementation":
         # Co-located tests such as app/login.spec.ts still belong to the test side.
         return "test" if matches_test_path(raw_path, policy) else "implementation"
-    return "other"
+    return best_kind or "other"
 
 
 def read_phase(root: Path | None = None) -> str | None:
