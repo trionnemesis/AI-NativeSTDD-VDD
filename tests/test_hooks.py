@@ -15,6 +15,27 @@ POLICY_SPEC = importlib.util.spec_from_file_location(
 )
 PATH_POLICY = importlib.util.module_from_spec(POLICY_SPEC)
 POLICY_SPEC.loader.exec_module(PATH_POLICY)
+sys.modules.setdefault("path_policy", PATH_POLICY)
+GREEN_GATE_SPEC = importlib.util.spec_from_file_location(
+    "green_gate", ROOT / ".claude" / "hooks" / "green_gate.py"
+)
+GREEN_GATE = importlib.util.module_from_spec(GREEN_GATE_SPEC)
+GREEN_GATE_SPEC.loader.exec_module(GREEN_GATE)
+
+
+def synthetic_check(label, probe_exit, command_exit, command_output=""):
+    def script(exit_code, output):
+        return (
+            "import sys\n"
+            f"sys.stdout.write({output!r})\n"
+            f"sys.exit({exit_code})\n"
+        )
+
+    return {
+        "label": label,
+        "probe": [sys.executable, "-I", "-c", script(probe_exit, "")],
+        "command": [sys.executable, "-I", "-c", script(command_exit, command_output)],
+    }
 
 
 def run_hook(script, cwd, payload, env=None):
@@ -290,6 +311,72 @@ class HookTests(unittest.TestCase):
             self.assertEqual(result.returncode, 0)
             self.assertEqual(result.stdout, "")
             self.assertEqual(phase.read_text(), "GREEN")
+
+    def test_green_gate_reports_verification_failure_with_command_output(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            base = Path(tmp)
+            write_policy(base, test_roots=["checks"])
+            test = base / "checks" / "test_fail.py"
+            test.parent.mkdir()
+            test.write_text("def test_fails():\n    value = 1\n    assert value == 2\n")
+            phase = base / ".vdd" / "phase"
+            phase.write_text("RED_VERIFIED")
+
+            result = run_hook(".claude/hooks/green_gate.py", base, {})
+            payload = json.loads(result.stdout)
+
+            self.assertEqual(result.returncode, 0)
+            self.assertEqual(payload["decision"], "block")
+            self.assertIn("VERIFICATION_FAILED", payload["reason"])
+            self.assertNotIn("ENVIRONMENT_NOT_READY", payload["reason"])
+            self.assertIn("test_fails", payload["reason"])
+            self.assertEqual(phase.read_text(), "RED_VERIFIED")
+
+    def test_green_gate_separates_environment_error_from_verification_failure(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            base = Path(tmp)
+
+            missing_toolchain = GREEN_GATE.evaluate(
+                synthetic_check("pytest", probe_exit=1, command_exit=0), 1, base
+            )
+            failed_check = GREEN_GATE.evaluate(
+                synthetic_check(
+                    "pytest", probe_exit=0, command_exit=1, command_output="1 failed"
+                ),
+                1,
+                base,
+            )
+            passing_check = GREEN_GATE.evaluate(
+                synthetic_check("pytest", probe_exit=0, command_exit=0), 1, base
+            )
+
+            self.assertIn("ENVIRONMENT_NOT_READY", missing_toolchain)
+            self.assertNotIn("VERIFICATION_FAILED", missing_toolchain)
+            self.assertIn("setup/AGENT_SETUP_PROTOCOL.md", missing_toolchain)
+
+            self.assertIn("VERIFICATION_FAILED", failed_check)
+            self.assertNotIn("ENVIRONMENT_NOT_READY", failed_check)
+            self.assertIn("1 failed", failed_check)
+
+            self.assertIsNone(passing_check)
+
+    def test_green_gate_caps_captured_output_in_block_reason(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            base = Path(tmp)
+            noise = "x" * (GREEN_GATE.OUTPUT_TAIL_CHARS * 3)
+
+            reason = GREEN_GATE.evaluate(
+                synthetic_check(
+                    "pytest", probe_exit=0, command_exit=1, command_output=noise
+                ),
+                1,
+                base,
+            )
+
+            self.assertIn("VERIFICATION_FAILED", reason)
+            self.assertIn("前段省略", reason)
+            self.assertIn("後段省略", reason)
+            self.assertLess(len(reason), len(noise))
 
     def test_managed_settings_remove_fixed_folder_and_agent_restrictions(self):
         managed = json.loads(
