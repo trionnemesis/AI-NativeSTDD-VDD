@@ -4,9 +4,10 @@
 # 區分的是診斷資訊，不是強制等級。
 import json
 import os
+import selectors
 import subprocess
 import sys
-import tempfile
+import time
 from collections import namedtuple
 
 from path_policy import PolicyError, load_policy, project_root
@@ -15,12 +16,19 @@ COMMAND_TIMEOUT_SECONDS = 300
 PROBE_TIMEOUT_SECONDS = 60
 OUTPUT_TAIL_BYTES = 2000
 COMMAND_ECHO_CHARS = 300
+READ_CHUNK_BYTES = 65536
+POLL_SECONDS = 1.0
 SETUP_REFERENCE = "setup/AGENT_SETUP_PROTOCOL.md §2 P5"
 ENVIRONMENT_NOTE = (
     "  這是環境錯誤，不是 verification failure；gate 仍然 block。\n"
     f"  修復：{SETUP_REFERENCE}。"
 )
-RUNNER_NOTE = "  這是 runner／設定層錯誤，沒有任何斷言被執行；gate 仍然 block。"
+# exit code 無法判定「跑了多少」，所以不得宣稱沒有斷言執行過。
+# 借用 docs/05 GATE:VDD 既有語意：INCONCLUSIVE 不得當作 PASS。
+INCONCLUSIVE_NOTE = (
+    "  此結果 INCONCLUSIVE：exit code 無法判定檢查結論，且可能已有部分測試執行；\n"
+    "  依 GATE:VDD 語意 INCONCLUSIVE 不得當作 PASS，gate 仍然 block。"
+)
 
 # pytest 與 ruff 都只有一個 exit code 代表「檢查真的沒過」，其餘非零是 runner 錯誤。
 PYTEST_EXITS = {
@@ -40,34 +48,60 @@ def block(reason):
     print(json.dumps({"decision": "block", "reason": reason}, ensure_ascii=False))
 
 
-def read_tail(sink):
-    # 只從檔案尾端讀回上限內的位元組，輸出多大都不會進 hook 的記憶體。
-    sink.flush()
-    size = sink.seek(0, os.SEEK_END)
-    sink.seek(max(0, size - OUTPUT_TAIL_BYTES), os.SEEK_SET)
-    text = sink.read().decode("utf-8", "replace").strip()
+def decode_tail(tail, total):
+    text = bytes(tail).decode("utf-8", "replace").strip()
     if not text:
         return "<no output>"
-    if size > OUTPUT_TAIL_BYTES:
+    if total > OUTPUT_TAIL_BYTES:
         return "…（前段省略）\n" + text
     return text
 
 
 def capture(command, timeout, cwd):
-    """執行命令，只保留有上限的輸出尾段。returncode 為 None 代表逾時。"""
-    with tempfile.TemporaryFile() as sink:
+    """執行命令，串流讀取且只保留有上限的輸出尾段。
+
+    輸出永遠不會整份進入記憶體或磁碟，因此吵雜的 suite 無法拖垮 hook 或 host。
+    returncode 為 None 代表逾時。
+    """
+    deadline = time.monotonic() + timeout
+    tail = bytearray()
+    total = 0
+    timed_out = False
+
+    with subprocess.Popen(
+        command, cwd=cwd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT
+    ) as proc:
+        selector = selectors.DefaultSelector()
+        selector.register(proc.stdout, selectors.EVENT_READ)
         try:
-            completed = subprocess.run(
-                command,
-                cwd=cwd,
-                timeout=timeout,
-                check=False,
-                stdout=sink,
-                stderr=subprocess.STDOUT,
-            )
-        except subprocess.TimeoutExpired:
-            return Captured(None, read_tail(sink))
-        return Captured(completed.returncode, read_tail(sink))
+            while True:
+                remaining = deadline - time.monotonic()
+                if remaining <= 0:
+                    timed_out = True
+                    break
+                if not selector.select(min(remaining, POLL_SECONDS)):
+                    continue
+                chunk = os.read(proc.stdout.fileno(), READ_CHUNK_BYTES)
+                if not chunk:
+                    break
+                total += len(chunk)
+                tail += chunk
+                if len(tail) > OUTPUT_TAIL_BYTES:
+                    del tail[: len(tail) - OUTPUT_TAIL_BYTES]
+        finally:
+            selector.close()
+
+        if not timed_out:
+            try:
+                proc.wait(timeout=max(0.0, deadline - time.monotonic()))
+            except subprocess.TimeoutExpired:
+                timed_out = True
+        if timed_out:
+            proc.kill()
+            proc.wait()
+
+    returncode = None if timed_out else proc.returncode
+    return Captured(returncode, decode_tail(tail, total))
 
 
 def command_echo(command):
@@ -135,12 +169,12 @@ def evaluate(check, index, cwd):
     except OSError as exc:
         return (
             f"{header} VERIFICATION_ERROR：命令無法執行（{type(exc).__name__}）。\n"
-            f"{RUNNER_NOTE}"
+            f"{INCONCLUSIVE_NOTE}"
         )
     if result.returncode is None:
         return (
             f"{header} VERIFICATION_ERROR：命令逾時（{COMMAND_TIMEOUT_SECONDS}s）。\n"
-            f"{RUNNER_NOTE}\n  output:\n{result.tail}"
+            f"{INCONCLUSIVE_NOTE}\n  output:\n{result.tail}"
         )
     if result.returncode == 0:
         return None
@@ -151,7 +185,7 @@ def evaluate(check, index, cwd):
         if result.returncode in check["failure_exit_codes"]
         else "VERIFICATION_ERROR"
     )
-    note = "" if verdict == "VERIFICATION_FAILED" else f"\n{RUNNER_NOTE}"
+    note = "" if verdict == "VERIFICATION_FAILED" else f"\n{INCONCLUSIVE_NOTE}"
     return (
         f"{header} {verdict}：exit={result.returncode}（{meaning}）。{note}\n"
         f"  command: {command_echo(check['command'])}\n"

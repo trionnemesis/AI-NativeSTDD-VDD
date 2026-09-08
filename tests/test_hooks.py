@@ -6,6 +6,7 @@ import stat
 import subprocess
 import sys
 import tempfile
+import time
 import unittest
 import unittest.mock
 from pathlib import Path
@@ -414,7 +415,8 @@ class HookTests(unittest.TestCase):
 
             self.assertIn("VERIFICATION_ERROR", runner_error)
             self.assertNotIn("VERIFICATION_FAILED", runner_error)
-            self.assertIn("沒有任何斷言被執行", runner_error)
+            self.assertIn("INCONCLUSIVE", runner_error)
+            self.assertNotIn("沒有任何斷言", runner_error)
 
             self.assertIn("VERIFICATION_FAILED", red_tests)
             self.assertNotIn("VERIFICATION_ERROR", red_tests)
@@ -461,6 +463,56 @@ class HookTests(unittest.TestCase):
             self.assertEqual(result.returncode, 0)
             self.assertEqual(result.stdout, "")
             self.assertEqual(phase.read_text(), "GREEN")
+
+    def test_green_gate_capture_is_bounded_while_the_command_runs(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            base = Path(tmp)
+            volume = 20 * 1024 * 1024
+
+            captured = GREEN_GATE.capture(
+                [
+                    sys.executable,
+                    "-I",
+                    "-c",
+                    (
+                        "import sys\n"
+                        f'sys.stdout.write("x" * {volume})\n'
+                        "sys.exit(1)\n"
+                    ),
+                ],
+                30,
+                base,
+            )
+
+            self.assertEqual(captured.returncode, 1)
+            self.assertIn("前段省略", captured.tail)
+            # 尾段長度只受上限支配，與 20MB 的輸出總量無關。
+            self.assertLess(len(captured.tail), GREEN_GATE.OUTPUT_TAIL_BYTES + 100)
+
+    def test_green_gate_capture_times_out_without_hanging(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            base = Path(tmp)
+            started = time.monotonic()
+
+            captured = GREEN_GATE.capture(
+                [
+                    sys.executable,
+                    "-I",
+                    "-c",
+                    (
+                        "import sys, time\n"
+                        'sys.stdout.write("started\\n")\n'
+                        "sys.stdout.flush()\n"
+                        "time.sleep(60)\n"
+                    ),
+                ],
+                2,
+                base,
+            )
+
+            self.assertIsNone(captured.returncode)
+            self.assertIn("started", captured.tail)
+            self.assertLess(time.monotonic() - started, 30)
 
     def test_managed_settings_remove_fixed_folder_and_agent_restrictions(self):
         managed = json.loads(
