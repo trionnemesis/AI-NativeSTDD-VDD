@@ -126,7 +126,7 @@ COMMAND_PREFIXES = {
     "command": "",
     "builtin": "",
     "exec": "",
-    "env": "u",
+    "env": "uC",
     "time": "",
     "nohup": "",
     "nice": "n",
@@ -140,6 +140,18 @@ COMMAND_PREFIXES = {
     "do": "",
     "else": "",
 }
+# GNU env 的 -C DIR／--chdir=DIR 會在執行命令前切換工作目錄
+# （本機 env --help：`-C, --chdir=DIR  change working directory to DIR`），
+# 只把它當成一般吃值的選項會漏掉 env -C app cat ../checks/secret。
+PREFIX_CHDIR_OPTIONS = {"env": ("C", "--chdir")}
+# bash 的 cd 只接受這些選項（本機 help cd：cd [-L|[-P [-e]] [-@]] [dir]）；
+# 其餘一律是 invalid option，cd 必定失敗。
+CD_OPTIONS = "LPe@"
+# brace expansion 展開上限；超過就原樣保留，避免 {1..100000} 這種輸入炸開。
+BRACE_EXPANSION_LIMIT = 64
+BRACE_RANGE = re.compile(
+    r"^(-?\d+)\.\.(-?\d+)(?:\.\.(-?\d+))?$|^([A-Za-z])\.\.([A-Za-z])$"
+)
 GROUPING_CHARACTERS = "({!"
 # 輸入重導向：<file、0<file、<>file（讀寫）。
 # << 是 heredoc（其後是分隔字串不是路徑），<& 是 fd 複製，兩者排除。
@@ -159,30 +171,46 @@ CONDITIONAL_CLOSERS = ("]]", "))")
 WORD_TERMINATORS = frozenset(" \t\n\r|;&<>()")
 
 
-def _prefix_consumes_next(token, prefix_options):
-    """prefix 的這個選項是否把下一個 token 當成值吃掉。
+def _prefix_option(token, tokens, index, prefix_options, chdir_option):
+    """解析 prefix 自己的選項，回傳 (chdir 目的地或 None, 是否吃掉下一個 token)。
 
     -uPATH／-n10 的值已經黏在同一個 token 上，下一個 token 是要執行的命令；
     再吃掉它會讓 env -uPATH cat x 的命令名變成 x，整個 reader 判定失效。
     """
     if not prefix_options:
-        return False
+        return None, False
     if token.startswith("--"):
-        return "=" not in token and any(
+        option, separator, attached = token.partition("=")
+        if chdir_option and option == chdir_option[1]:
+            if separator:
+                return attached, False
+            return (tokens[index] if index < len(tokens) else None), True
+        return None, not separator and any(
             letter in prefix_options for letter in token[2:]
         )
     letters = token[1:]
     for position, letter in enumerate(letters, start=1):
-        if letter in prefix_options:
-            # 吃值的字母必須是叢集的最後一個，值才會落在下一個 token。
-            return position == len(letters)
-    return False
+        if letter not in prefix_options:
+            continue
+        # 吃值的字母之後全是它的值；值黏著時下一個 token 就是命令本身。
+        attached = letters[position:]
+        wanted = bool(chdir_option) and letter == chdir_option[0]
+        if attached:
+            return (attached if wanted else None), False
+        value = tokens[index] if index < len(tokens) else None
+        return (value if wanted else None), True
+    return None, False
 
 
 def segment_command(tokens):
-    """剝掉 env assignment、分組語法、重導向與 command prefix，回傳 (name, remaining)。"""
+    """剝掉 env assignment、分組語法、重導向與 command prefix。
+
+    回傳 (name, remaining, chdir)；chdir 是 prefix 自己造成的工作目錄變更。
+    """
     index = 0
     prefix_options = ""
+    chdir_option = None
+    chdir = None
     while index < len(tokens):
         raw = tokens[index]
         token = raw.lstrip(GROUPING_CHARACTERS)
@@ -200,17 +228,21 @@ def segment_command(tokens):
             continue
         if token.startswith("-") and token != "-":
             # prefix 自己的選項；只有在值沒有黏在同一個 token 上時才吃下一個。
-            if _prefix_consumes_next(token, prefix_options):
-                index += 1
-            index += 1
+            destination, consumes = _prefix_option(
+                token, tokens, index + 1, prefix_options, chdir_option
+            )
+            if destination:
+                chdir = destination
+            index += 2 if consumes else 1
             continue
         name = PurePosixPath(token).name
         if name in COMMAND_PREFIXES:
             prefix_options = COMMAND_PREFIXES[name]
+            chdir_option = PREFIX_CHDIR_OPTIONS.get(name)
             index += 1
             continue
-        return name, tokens[index + 1:]
-    return None, []
+        return name, tokens[index + 1:], chdir
+    return None, [], chdir
 
 
 def _quoted_segment(text, index):
@@ -253,8 +285,8 @@ def _read_word(text, index):
     return "".join(word), index
 
 
-def redirection_targets(segment):
-    """回傳 (讀取目標, 寫入目標)；重導向讓任何命令都變成 reader 或 writer。
+def redirection_targets(segment, conditional=0):
+    """回傳 (讀取目標, 寫入目標, 結束時的條件式深度)。
 
     必須在原始文字上判定，不能用 shlex 的 token：shlex 已經把引號拿掉，
     printf '%s' '<checks/x' 這種純字串會與真正的重導向無法區分，
@@ -262,7 +294,6 @@ def redirection_targets(segment):
     """
     reads = []
     writes = []
-    conditional = 0
     index = 0
     while index < len(segment):
         character = segment[index]
@@ -312,7 +343,7 @@ def redirection_targets(segment):
         target, index = _read_word(segment, index)
         if target:
             writes.append(target)
-    return reads, writes
+    return reads, writes, conditional
 
 
 def _long_option(token, tokens, index):
@@ -461,6 +492,14 @@ def cd_destination(tokens):
     None 代表這個 cd 必定失敗、工作目錄不變（operand 超過一個）；
     "" 代表目的地無法靜態判定（無 operand、cd -、含變數或萬用字元）。
     """
+    for token in tokens:
+        if token == "--":
+            break
+        if token.startswith("-") and token != "-" and any(
+            letter not in CD_OPTIONS for letter in token[1:]
+        ):
+            # invalid option，bash 直接拒絕，工作目錄不變。
+            return None
     destinations = path_operands("cd", tokens)
     if len(destinations) > 1:
         return None
@@ -471,11 +510,115 @@ def cd_destination(tokens):
     return destinations[0]
 
 
+def _brace_body(text, start):
+    """回傳 (大括號內容, 右括號之後的位置)；沒有配對的右括號回傳 (None, start)。"""
+    depth = 0
+    for index in range(start, len(text)):
+        if text[index] == "{":
+            depth += 1
+        elif text[index] == "}":
+            depth -= 1
+            if depth == 0:
+                return text[start + 1:index], index + 1
+    return None, start
+
+
+def _brace_alternatives(body):
+    """依最外層逗號切開；巢狀大括號內的逗號不切。"""
+    parts = []
+    depth = 0
+    current = []
+    for character in body:
+        if character == "{":
+            depth += 1
+        elif character == "}":
+            depth -= 1
+        elif character == "," and depth == 0:
+            parts.append("".join(current))
+            current = []
+            continue
+        current.append(character)
+    parts.append("".join(current))
+    return parts
+
+
+def _brace_range(body):
+    """{1..3}／{a..c}／{1..9..2} 的展開值；不是 range 就回傳 None。"""
+    match = BRACE_RANGE.match(body)
+    if match is None:
+        return None
+    if match.group(1) is not None:
+        start, end = int(match.group(1)), int(match.group(2))
+        step = abs(int(match.group(3))) if match.group(3) else 1
+        values = range(start, end + (1 if end >= start else -1), (1 if end >= start else -1) * (step or 1))
+        return [str(value) for value in values]
+    start, end = ord(match.group(4)), ord(match.group(5))
+    direction = 1 if end >= start else -1
+    return [chr(value) for value in range(start, end + direction, direction)]
+
+
+def expand_braces(word):
+    """展開靜態可判定的 brace expression。
+
+    bash 的 cat {app,checks}/secret 會讀取兩個檔案，只看字面字串會分類成 other。
+    無法靜態展開（沒有配對括號、不是 alternation 也不是 range、超過上限）
+    時原樣保留，與 bash 的行為一致。
+    """
+    start = word.find("{")
+    if start < 0:
+        return [word]
+    body, after = _brace_body(word, start)
+    if body is None:
+        return [word]
+    alternatives = _brace_alternatives(body)
+    if len(alternatives) == 1:
+        alternatives = _brace_range(body)
+        if alternatives is None:
+            # bash 對這種大括號原樣保留，只繼續展開後面的部分。
+            head = word[:after]
+            return [head + tail for tail in expand_braces(word[after:])][
+                :BRACE_EXPANSION_LIMIT
+            ]
+    prefix = word[:start]
+    results = []
+    for alternative in alternatives:
+        for expanded in expand_braces(alternative + word[after:]):
+            results.append(prefix + expanded)
+            if len(results) >= BRACE_EXPANSION_LIMIT:
+                return results
+    return results
+
+
 def _resolve(argument, cwds):
-    """相對路徑要對每個候選 cwd 各解析一次。"""
-    if Path(argument).is_absolute():
-        return [argument]
-    return [os.path.normpath(str(candidate / argument)) for candidate in cwds]
+    """展開 brace 之後，相對路徑要對每個候選 cwd 各解析一次。"""
+    resolved = []
+    for word in expand_braces(argument):
+        if Path(word).is_absolute():
+            resolved.append(word)
+            continue
+        resolved.extend(
+            os.path.normpath(str(candidate / word)) for candidate in cwds
+        )
+    return resolved
+
+
+def advance(cwds, destination, may_create, seed=None):
+    """把候選 cwd 推進到 destination。
+
+    目錄存在就必定成功、不存在就必定失敗；只有同一行內可能先建立目錄時，
+    才同時保留兩條分支，且成功分支緊接在自己的失敗分支之前入列，
+    截斷不會只留下其中一邊。
+    """
+    candidates = list(seed) if seed and may_create else []
+    for candidate in cwds:
+        reached = candidate / destination
+        if reached.is_dir():
+            candidates.append(reached)
+        elif may_create:
+            candidates.extend([reached, candidate])
+        else:
+            candidates.append(candidate)
+    return list(dict.fromkeys(candidates))[:CWD_CANDIDATE_LIMIT]
 
 
 def shell_targets(shell_command, root):
@@ -496,15 +639,20 @@ def shell_targets(shell_command, root):
     # 換行在 shell 裡也是 command separator；<( 與 >( 是 process substitution，
     # 其括號內是另一個完整命令，與 $( 一樣要當成獨立 segment。
     # 保留分隔符是為了知道 segment 是不是接在 pipe 之後——那代表它讀 stdin。
+    conditional = 0
     parts = re.split(r"([|;&\n\r]+|[<>]\(|\$\(|\)|`)", shell_command)
     for position, segment in enumerate(parts[::2]):
         separator = parts[2 * position - 1] if position else ""
         piped = "|" in separator
+        if separator.strip() not in ("&&", "||", "|"):
+            # [[ ]] 內部只可能出現 && ／ ||；其餘分隔符代表條件式已經結束，
+            # 不重設就會讓一個沒閉合的 [[ 讓後續整行的重導向失去判定。
+            conditional = 0
         tokens = split_tokens(segment)
         # 重導向可能出現在命令名之前（<file cat），所以掃整個 segment。
         # 重導向讓任何命令都讀得到檔案，與命令是不是 reader 無關。
-        arguments, redirected = redirection_targets(segment)
-        name, remaining = segment_command(tokens)
+        arguments, redirected, conditional = redirection_targets(segment, conditional)
+        name, remaining, chdir = segment_command(tokens)
         if name in CD_COMMANDS:
             destination = cd_destination(remaining)
             if destination is None:
@@ -515,27 +663,18 @@ def shell_targets(shell_command, root):
                 cwds = [root]
             else:
                 success_cwd = success_cwd / destination
-                candidates = [success_cwd, root] if may_create else []
-                for candidate in cwds:
-                    reached = candidate / destination
-                    if reached.is_dir():
-                        # 目錄存在，cd 必定成功；沒有失敗分支要保留。
-                        candidates.append(reached)
-                    elif may_create:
-                        # 成功分支緊接在自己的失敗分支之前，截斷不會只留下其中一邊。
-                        candidates.extend([reached, candidate])
-                    else:
-                        candidates.append(candidate)
-                cwds = list(dict.fromkeys(candidates))[:CWD_CANDIDATE_LIMIT]
+                cwds = advance(cwds, destination, may_create, [success_cwd, root])
         elif name in READ_COMMANDS:
             arguments += path_operands(name, remaining)
         if not arguments and not piped and implicit_cwd_scope(name, remaining):
             # 這些 reader 不帶路徑時遞迴搜尋 cwd，那就是這次搜尋的 scope。
             arguments = ["."]
+        # prefix 造成的 chdir 只影響這一個命令，不改變後續 segment 的 cwd。
+        segment_cwds = advance(cwds, chdir, may_create) if chdir else cwds
         for argument in arguments:
-            targets.extend(_resolve(argument, cwds))
+            targets.extend(_resolve(argument, segment_cwds))
         for argument in redirected:
-            written.extend(_resolve(argument, cwds))
+            written.extend(_resolve(argument, segment_cwds))
     return targets, written
 
 

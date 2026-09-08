@@ -1761,6 +1761,126 @@ class HookTests(unittest.TestCase):
                     )
                     self.assertEqual(result.returncode, 2, result.stderr)
 
+    def test_bash_guard_tracks_env_prefix_chdir(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            base = Path(tmp)
+            write_policy(base, implementation_roots=["app"], test_roots=["checks"])
+            (base / "app").mkdir()
+            (base / "checks").mkdir()
+            (base / ".vdd" / "phase").write_text("RED_VERIFIED")
+
+            # GNU env 的 -C DIR／--chdir=DIR 會在執行命令前切換工作目錄
+            for command in (
+                "env -C app cat ../checks/secret",
+                "env -Capp cat ../checks/secret",
+                "env --chdir=app cat ../checks/secret",
+                "env --chdir app cat ../checks/secret",
+            ):
+                with self.subTest(blocked=command):
+                    result = run_hook(
+                        ".claude/hooks/bash_guard.py",
+                        base,
+                        {"tool_input": {"command": command}},
+                    )
+                    self.assertEqual(result.returncode, 2, result.stderr)
+
+            # -C 之後仍在實作側就放行；-u 的既有語意不受影響
+            allowed = run_hook(
+                ".claude/hooks/bash_guard.py",
+                base,
+                {"tool_input": {"command": "env -C app cat login.py"}},
+            )
+            self.assertEqual(allowed.returncode, 0, allowed.stderr)
+
+    def test_bash_guard_rejects_unsupported_cd_options(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            base = Path(tmp)
+            write_policy(base, implementation_roots=["app"], test_roots=["checks"])
+            (base / "app").mkdir()
+            (base / "checks").mkdir()
+            (base / ".vdd" / "phase").write_text("RED_VERIFIED")
+
+            # bash 只接受 -L／-P／-e／-@；-Z 是 invalid option，工作目錄不變
+            blocked = run_hook(
+                ".claude/hooks/bash_guard.py",
+                base,
+                {"tool_input": {"command": "cd -Z app || cat checks/secret"}},
+            )
+            # 合法選項仍要正常推進 cwd
+            still_blocked = run_hook(
+                ".claude/hooks/bash_guard.py",
+                base,
+                {"tool_input": {"command": "cd -P app && cat ../checks/secret"}},
+            )
+            allowed = run_hook(
+                ".claude/hooks/bash_guard.py",
+                base,
+                {"tool_input": {"command": "cd -P app && cat login.py"}},
+            )
+
+            self.assertEqual(blocked.returncode, 2, blocked.stderr)
+            self.assertEqual(still_blocked.returncode, 2, still_blocked.stderr)
+            self.assertEqual(allowed.returncode, 0, allowed.stderr)
+
+    def test_bash_guard_expands_static_brace_expressions(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            base = Path(tmp)
+            write_policy(base, implementation_roots=["app"], test_roots=["checks"])
+            (base / "app").mkdir()
+            (base / "checks").mkdir()
+            (base / ".vdd" / "phase").write_text("RED_VERIFIED")
+
+            for command in (
+                "cat {app,checks}/secret",
+                "cat {app/{a,b},checks/c}",
+            ):
+                with self.subTest(blocked=command):
+                    result = run_hook(
+                        ".claude/hooks/bash_guard.py",
+                        base,
+                        {"tool_input": {"command": command}},
+                    )
+                    self.assertEqual(result.returncode, 2, result.stderr)
+
+            # 展開後都在實作側，或不是 alternation／range（bash 原樣保留）
+            for command in ("cat {app,app}/secret", "cat {a..c}/x"):
+                with self.subTest(allowed=command):
+                    result = run_hook(
+                        ".claude/hooks/bash_guard.py",
+                        base,
+                        {"tool_input": {"command": command}},
+                    )
+                    self.assertEqual(result.returncode, 0, result.stderr)
+
+    def test_bash_guard_keeps_conditional_depth_across_separators(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            base = Path(tmp)
+            write_policy(base, implementation_roots=["app"], test_roots=["checks"])
+            (base / "app").mkdir()
+            (base / "checks").mkdir()
+            (base / ".vdd" / "phase").write_text("RED_VERIFIED")
+
+            # [[ ]] 內部的 && 會被 segment 切割拆開，條件式 context 必須延續
+            allowed = run_hook(
+                ".claude/hooks/bash_guard.py",
+                base,
+                {"tool_input": {"command": "[[ x == x && app < checks/secret ]]"}},
+            )
+            # 條件式結束後的重導向仍要擋；沒閉合的 [[ 不得讓整行失去判定
+            for command in (
+                "[[ x == x && a < b ]]; cat < checks/secret",
+                "echo '[[' ; cat < checks/secret",
+            ):
+                with self.subTest(blocked=command):
+                    result = run_hook(
+                        ".claude/hooks/bash_guard.py",
+                        base,
+                        {"tool_input": {"command": command}},
+                    )
+                    self.assertEqual(result.returncode, 2, result.stderr)
+
+            self.assertEqual(allowed.returncode, 0, allowed.stderr)
+
     def test_setup_protocol_documents_the_read_side_guard(self):
         protocol = (ROOT / "setup" / "AGENT_SETUP_PROTOCOL.md").read_text()
 
