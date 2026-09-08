@@ -7,6 +7,7 @@ import subprocess
 import sys
 import tempfile
 import unittest
+import unittest.mock
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -47,7 +48,15 @@ def synthetic_check(
     }
 
 
+HOOK_TIMEOUT_SECONDS = 60
+
+
 def run_hook(script, cwd, payload, env=None):
+    # CLAUDE_PROJECT_DIR 必須釘在 fixture 上。若讓 ambient 值漏進來，hook 會把真正的
+    # repository 當成 project root，讀錯 policy，而 green_gate 更會再跑一次本檔的
+    # 測試而無限遞迴。timeout 讓這類問題 loud fail，而不是掛住。
+    if env is None:
+        env = {**os.environ, "CLAUDE_PROJECT_DIR": str(cwd)}
     return subprocess.run(
         [sys.executable, str(ROOT / script)],
         cwd=cwd,
@@ -55,6 +64,7 @@ def run_hook(script, cwd, payload, env=None):
         capture_output=True,
         text=True,
         env=env,
+        timeout=HOOK_TIMEOUT_SECONDS,
         check=False,
     )
 
@@ -431,6 +441,26 @@ class HookTests(unittest.TestCase):
             self.assertNotIn("VERIFICATION_FAILED", payload["reason"])
             self.assertIn("collection error", payload["reason"])
             self.assertEqual(phase.read_text(), "RED_VERIFIED")
+
+    def test_hook_fixture_ignores_ambient_project_dir(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            base = Path(tmp)
+            write_policy(base, test_roots=["checks"])
+            test = base / "checks" / "test_ok.py"
+            test.parent.mkdir()
+            test.write_text("def test_ok():\n    value = 1\n    assert value == 1\n")
+            phase = base / ".vdd" / "phase"
+            phase.write_text("RED_VERIFIED")
+
+            # 模擬 Claude Code runtime：ambient CLAUDE_PROJECT_DIR 指向真正的 repo。
+            with unittest.mock.patch.dict(
+                os.environ, {"CLAUDE_PROJECT_DIR": str(ROOT)}
+            ):
+                result = run_hook(".claude/hooks/green_gate.py", base, {})
+
+            self.assertEqual(result.returncode, 0)
+            self.assertEqual(result.stdout, "")
+            self.assertEqual(phase.read_text(), "GREEN")
 
     def test_managed_settings_remove_fixed_folder_and_agent_restrictions(self):
         managed = json.loads(
