@@ -23,18 +23,27 @@ GREEN_GATE = importlib.util.module_from_spec(GREEN_GATE_SPEC)
 GREEN_GATE_SPEC.loader.exec_module(GREEN_GATE)
 
 
-def synthetic_check(label, probe_exit, command_exit, command_output=""):
-    def script(exit_code, output):
-        return (
-            "import sys\n"
-            f"sys.stdout.write({output!r})\n"
-            f"sys.exit({exit_code})\n"
-        )
+def synthetic_check(
+    label, probe_exit, command_exit, command_output="", output_size=0
+):
+    # output_size 讓子行程「產生」大量輸出，而不是把它塞進 argv（會撞 ARG_MAX）。
+    def script(exit_code, output, size=0):
+        emit = f"sys.stdout.write({output!r})\n" if output else ""
+        if size:
+            emit += f'sys.stdout.write("x" * {size})\n'
+        return "import sys\n" + emit + f"sys.exit({exit_code})\n"
 
     return {
         "label": label,
         "probe": [sys.executable, "-I", "-c", script(probe_exit, "")],
-        "command": [sys.executable, "-I", "-c", script(command_exit, command_output)],
+        "command": [
+            sys.executable,
+            "-I",
+            "-c",
+            script(command_exit, command_output, output_size),
+        ],
+        "failure_exit_codes": {1},
+        "exit_meanings": {1: "TESTS_FAILED", 2: "INTERRUPTED"},
     }
 
 
@@ -363,11 +372,11 @@ class HookTests(unittest.TestCase):
     def test_green_gate_caps_captured_output_in_block_reason(self):
         with tempfile.TemporaryDirectory() as tmp:
             base = Path(tmp)
-            noise = "x" * (GREEN_GATE.OUTPUT_TAIL_CHARS * 3)
+            size = GREEN_GATE.OUTPUT_TAIL_BYTES * 100
 
             reason = GREEN_GATE.evaluate(
                 synthetic_check(
-                    "pytest", probe_exit=0, command_exit=1, command_output=noise
+                    "pytest", probe_exit=0, command_exit=1, output_size=size
                 ),
                 1,
                 base,
@@ -375,8 +384,53 @@ class HookTests(unittest.TestCase):
 
             self.assertIn("VERIFICATION_FAILED", reason)
             self.assertIn("前段省略", reason)
-            self.assertIn("後段省略", reason)
-            self.assertLess(len(reason), len(noise))
+            # reason 長度只由「輸出尾段 + 命令回顯 + 固定文案」決定，與輸出總量無關。
+            budget = (
+                GREEN_GATE.OUTPUT_TAIL_BYTES + GREEN_GATE.COMMAND_ECHO_CHARS + 500
+            )
+            self.assertLess(len(reason), budget)
+            self.assertLess(len(reason), size)
+
+    def test_green_gate_separates_runner_error_from_red_tests(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            base = Path(tmp)
+
+            runner_error = GREEN_GATE.evaluate(
+                synthetic_check("pytest", probe_exit=0, command_exit=2), 1, base
+            )
+            red_tests = GREEN_GATE.evaluate(
+                synthetic_check("pytest", probe_exit=0, command_exit=1), 1, base
+            )
+
+            self.assertIn("VERIFICATION_ERROR", runner_error)
+            self.assertNotIn("VERIFICATION_FAILED", runner_error)
+            self.assertIn("沒有任何斷言被執行", runner_error)
+
+            self.assertIn("VERIFICATION_FAILED", red_tests)
+            self.assertNotIn("VERIFICATION_ERROR", red_tests)
+
+    def test_green_gate_treats_collection_error_as_runner_error(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            base = Path(tmp)
+            write_policy(base, test_roots=["checks"])
+            broken = base / "checks" / "test_broken.py"
+            broken.parent.mkdir()
+            broken.write_text(
+                "import definitely_not_a_real_module_xyz\n\n"
+                "def test_x():\n"
+                "    assert definitely_not_a_real_module_xyz\n"
+            )
+            phase = base / ".vdd" / "phase"
+            phase.write_text("RED_VERIFIED")
+
+            result = run_hook(".claude/hooks/green_gate.py", base, {})
+            payload = json.loads(result.stdout)
+
+            self.assertEqual(payload["decision"], "block")
+            self.assertIn("VERIFICATION_ERROR", payload["reason"])
+            self.assertNotIn("VERIFICATION_FAILED", payload["reason"])
+            self.assertIn("collection error", payload["reason"])
+            self.assertEqual(phase.read_text(), "RED_VERIFIED")
 
     def test_managed_settings_remove_fixed_folder_and_agent_restrictions(self):
         managed = json.loads(
