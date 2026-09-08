@@ -1153,6 +1153,78 @@ class HookTests(unittest.TestCase):
             self.assertIn("PATH POLICY", result.stderr)
             self.assertIn("exactly one category", result.stderr)
 
+    def test_bash_guard_parses_attached_and_file_valued_options(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            base = Path(tmp)
+            write_policy(base, implementation_roots=["app"], test_roots=["checks"])
+            (base / "app").mkdir()
+            (base / "checks").mkdir()
+            (base / ".vdd" / "phase").write_text("RED_VERIFIED")
+
+            for command in (
+                # 黏著值：-eSECRET 未被辨識時 pattern_supplied 為假，
+                # 唯一的路徑 operand 反而被當成 pattern 丟掉
+                "rg -eSECRET checks",
+                "grep -R -eSECRET checks",
+                # -f/--file 的值本身就是要讀的檔案
+                "rg -f checks/patterns app",
+                "awk -f checks/test.awk data",
+                "grep --file=checks/patterns app",
+            ):
+                with self.subTest(blocked=command):
+                    result = run_hook(
+                        ".claude/hooks/bash_guard.py",
+                        base,
+                        {"tool_input": {"command": command}},
+                    )
+                    self.assertEqual(result.returncode, 2, result.stderr)
+
+            for command in ("rg checks app", "grep -e checks -rn app"):
+                with self.subTest(allowed=command):
+                    result = run_hook(
+                        ".claude/hooks/bash_guard.py",
+                        base,
+                        {"tool_input": {"command": command}},
+                    )
+                    self.assertEqual(result.returncode, 0, result.stderr)
+
+    def test_bash_guard_rejects_search_scopes_covering_the_isolated_side(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            base = Path(tmp)
+            write_policy(base, implementation_roots=["app"], test_roots=["checks"])
+            (base / "app").mkdir()
+            (base / "checks").mkdir()
+            phase = base / ".vdd" / "phase"
+            phase.write_text("RED_VERIFIED")
+
+            for command in (
+                "rg SECRET .",
+                # 不帶路徑時遞迴搜尋 cwd，那本身就是涵蓋隔離側的 scope
+                "rg SECRET",
+            ):
+                with self.subTest(phase="RED_VERIFIED", command=command):
+                    result = run_hook(
+                        ".claude/hooks/bash_guard.py",
+                        base,
+                        {"tool_input": {"command": command}},
+                    )
+                    self.assertEqual(result.returncode, 2, result.stderr)
+
+            scoped = run_hook(
+                ".claude/hooks/bash_guard.py",
+                base,
+                {"tool_input": {"command": "rg SECRET app"}},
+            )
+            self.assertEqual(scoped.returncode, 0, scoped.stderr)
+
+            phase.write_text("INIT")
+            reversed_lane = run_hook(
+                ".claude/hooks/bash_guard.py",
+                base,
+                {"tool_input": {"command": "rg SECRET ."}},
+            )
+            self.assertEqual(reversed_lane.returncode, 2, reversed_lane.stderr)
+
     def test_setup_protocol_documents_the_read_side_guard(self):
         protocol = (ROOT / "setup" / "AGENT_SETUP_PROTOCOL.md").read_text()
 

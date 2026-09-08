@@ -17,6 +17,7 @@ from path_policy import (
     load_policy,
     project_root,
     read_phase,
+    scope_reaches_forbidden,
 )
 
 data = json.load(sys.stdin)
@@ -76,9 +77,16 @@ def split_tokens(segment):
 # grep/rg/ag 的第一個 positional 是 PATTERN，sed 是 script，awk 是程式碼——都不是路徑。
 # 把它們當路徑會誤擋 `rg checks app` 這種合法搜尋。
 PATTERN_FIRST_READERS = frozenset({"grep", "rg", "ag", "sed", "awk"})
-PATTERN_OPTIONS = frozenset({"-e", "--regexp", "-f", "--file", "--expression"})
-VALUE_OPTIONS = PATTERN_OPTIONS | frozenset(
-    {"-m", "--max-count", "--include", "--exclude", "-g", "--glob", "--type", "-t"}
+# 不給路徑時遞迴搜尋 cwd，因此「沒有 operand」本身就是一個 scope。
+SEARCH_READERS = frozenset({"grep", "rg", "ag"})
+# 短選項可以黏著值（-ePATTERN、-fFILE），也可以吃下一個 token。
+VALUE_SHORT_OPTIONS = "efmgt"
+PATTERN_SHORT_OPTIONS = "ef"
+FILE_SHORT_OPTIONS = "f"
+PATTERN_LONG_OPTIONS = frozenset({"--regexp", "--file", "--expression"})
+FILE_LONG_OPTIONS = frozenset({"--file"})
+VALUE_LONG_OPTIONS = PATTERN_LONG_OPTIONS | frozenset(
+    {"--max-count", "--include", "--exclude", "--glob", "--type"}
 )
 
 
@@ -92,31 +100,70 @@ def segment_command(tokens):
     return PurePosixPath(tokens[index]).name, tokens[index + 1:]
 
 
+def _long_option(token, tokens, index):
+    """回傳 (pattern_supplied, file_value, next_index)。"""
+    option, _, attached = token.partition("=")
+    supplied = option in PATTERN_LONG_OPTIONS
+    value = attached or None
+    if value is None and option in VALUE_LONG_OPTIONS and index < len(tokens):
+        value = tokens[index]
+        index += 1
+    return supplied, value if option in FILE_LONG_OPTIONS else None, index
+
+
+def _short_options(token, tokens, index):
+    """處理短選項叢集；值可能黏在同一個 token 上（-ePATTERN）或落在下一個 token。"""
+    supplied = False
+    file_value = None
+    letters = token[1:]
+    position = 0
+    while position < len(letters):
+        letter = letters[position]
+        position += 1
+        if letter not in VALUE_SHORT_OPTIONS:
+            continue
+        supplied = supplied or letter in PATTERN_SHORT_OPTIONS
+        attached = letters[position:]
+        if attached:
+            value = attached
+        elif index < len(tokens):
+            value = tokens[index]
+            index += 1
+        else:
+            value = None
+        if letter in FILE_SHORT_OPTIONS:
+            file_value = value
+        break
+    return supplied, file_value, index
+
+
 def path_operands(name, tokens):
-    """從 reader 的引數取出真正的路徑 operand。"""
+    """從 reader 的引數取出真正的路徑 operand。
+
+    -f／--file 的值本身就是要被讀取的 pattern 檔，因此同時計入 read target。
+    """
     operands = []
+    file_values = []
     pattern_supplied = False
     index = 0
     while index < len(tokens):
         token = tokens[index]
-        if token == "--":
-            operands.extend(item for item in tokens[index + 1:] if item)
-            break
-        if token.startswith("-") and token != "-":
-            option = token.split("=", 1)[0]
-            if option in PATTERN_OPTIONS:
-                pattern_supplied = True
-            if option in VALUE_OPTIONS and "=" not in token:
-                index += 2
-                continue
-            index += 1
-            continue
-        if token:
-            operands.append(token)
         index += 1
+        if token == "--":
+            operands.extend(item for item in tokens[index:] if item)
+            break
+        if not token.startswith("-") or token == "-":
+            if token:
+                operands.append(token)
+            continue
+        handler = _long_option if token.startswith("--") else _short_options
+        supplied, file_value, index = handler(token, tokens, index)
+        pattern_supplied = pattern_supplied or supplied
+        if file_value:
+            file_values.append(file_value)
     if name in PATTERN_FIRST_READERS and not pattern_supplied and operands:
-        return operands[1:]
-    return operands
+        operands = operands[1:]
+    return operands + file_values
 
 
 def read_targets(shell_command, root):
@@ -142,7 +189,11 @@ def read_targets(shell_command, root):
             continue
         if name not in READ_COMMANDS:
             continue
-        for argument in path_operands(name, tokens):
+        arguments = path_operands(name, tokens)
+        if not arguments and name in SEARCH_READERS:
+            # rg／grep 不帶路徑時遞迴搜尋 cwd，那就是這次搜尋的 scope。
+            arguments = ["."]
+        for argument in arguments:
             if Path(argument).is_absolute():
                 targets.append(argument)
             else:
@@ -158,6 +209,9 @@ if forbidden is not None and isolated_side_exists(policy, forbidden, root):
     for target in read_targets(command, root):
         if classify_path(target, policy) == forbidden:
             read_violations.append(f"讀取 {target}（{side_label}側）")
+        elif scope_reaches_forbidden(target, policy, forbidden):
+            # 目錄 operand 會被遞迴搜尋，`rg SECRET .` 一樣讀得到隔離側。
+            read_violations.append(f"搜尋範圍 {target} 涵蓋{side_label}側")
 
 violations = [label for pattern, label in patterns if re.search(pattern, command)]
 violations.extend(read_violations)
