@@ -28,6 +28,10 @@ DEFAULT_POLICY: dict[str, Any] = {
 }
 PATH_TEMPLATE_FIELDS = {"module", "relative", "path"}
 
+# 只有這些 phase 代表「實作已被允許」；read-side 與 write-side 必須共用同一定義，
+# 否則兩側會各自漂移成不同的 isolation 語意。
+IMPLEMENTATION_PHASES = ("RED_VERIFIED", "GREEN")
+
 
 class PolicyError(ValueError):
     """Raised when the local path policy cannot be enforced safely."""
@@ -184,6 +188,17 @@ def load_policy(path: Path | None = None) -> dict[str, Any]:
         policy["test_roots"], "test_roots", paths=True
     )
     return policy
+
+
+def read_phase(root: Path | None = None) -> str | None:
+    """Return the governance phase, or None when the state file is absent."""
+    phase_file = (root or project_root()) / ".vdd" / "phase"
+    try:
+        if not phase_file.exists():
+            return None
+        return phase_file.read_text(encoding="utf-8").strip()
+    except (OSError, UnicodeError) as exc:
+        raise PolicyError(f"cannot read the governance phase: {exc}") from exc
 
 
 def repo_relative_path(raw_path: str, root: Path | None = None) -> str | None:

@@ -47,9 +47,9 @@ confirm_mode_checklist:
     command: "python3 .claude/hooks/path_policy.py && cat .vdd/phase"
 
   - id: "CM-04"
-    check: "6 個 hook entrypoints 與 path_policy.py 存在"
+    check: "7 個 hook entrypoints 與 path_policy.py 存在"
     command: "ls .claude/hooks/"
-    expected: "7 個 .py 檔案"
+    expected: "8 個 .py 檔案"
 
   - id: "CM-05"
     check: "project settings 有 PreToolUse／Stop／UserPromptSubmit hooks"
@@ -62,7 +62,21 @@ confirm_mode_checklist:
   - id: "CM-07"
     check: "System／Change Profile、Evidence 與 Release contract 可載入"
     command: "test -f governance/profiles/system.yaml && test -f governance/profiles/change.yaml && test -f governance/gates/vdd.yaml && test -f governance/gates/deploy.yaml"
+
+  - id: "CM-08"
+    check: "read-side isolation guard 已註冊於 PreToolUse Read|Grep|Glob"
+    command: "python3 -c \"import json; p=json.load(open('.claude/settings.json'))['hooks']['PreToolUse']; assert any(e.get('matcher')=='Read|Grep|Glob' and any('read_isolation_guard.py' in h['command'] for h in e['hooks']) for e in p)\""
+    note: "檔案存在只證明 configured；還需 CM-03 的 .vdd/phase 才能決定 lane"
 ```
+
+`GATE:RED` 的 `agent_isolation_enforced` 有兩側，兩側都由 `.vdd/phase` 決定方向：
+
+| phase | lane | 不可讀 |
+|---|---|---|
+| `RED_VERIFIED`、`GREEN` | implementation | configured `test_roots` 與符合 `test_file_patterns` 的檔案 |
+| 其他（含 `INIT` 與檔案不存在） | test_authoring | configured `implementation_roots` |
+
+`protected_spec_roots` 兩側都可讀——Canonical Spec 是雙方共同的約束來源。
 
 **任何項目 FAIL → 進入 Configure Mode 執行對應 Phase**
 
@@ -168,6 +182,7 @@ bash setup/init.sh . .vdd/path-policy.json
 3. `red_evidence_template` 解析後的 JSON 不存在，卻要求進入實作
 4. 請求弱化測試（pytest.skip / assert True / xfail）
 5. T3 需求沒有人工授權就嘗試 auto-dispatch
+6. 為了讀取當前 lane 不可讀的一側，而改用 Bash、改寫 `.vdd/phase` 或停用 hook
 
 ---
 
@@ -181,10 +196,11 @@ CONFIRM MODE RESULT:
   CM-01: PASS — VDD = Verification & Validation-Driven Dev, GATE:RED = runtime 強制
   CM-02: PASS — managed-settings.json 存在
   CM-03: PASS — path policy JSON valid；.vdd/phase = RED_VERIFIED
-  CM-04: PASS — 6 個 hook entrypoints + path_policy.py 存在
+  CM-04: PASS — 7 個 hook entrypoints + path_policy.py 存在
   CM-05: PASS — project hooks: PreToolUse, Stop, UserPromptSubmit, SessionStart
   CM-06: PASS — red-verifier subagent 存在
   CM-07: PASS — profile、VDD 與 deploy contracts 可載入
+  CM-08: PASS — read_isolation_guard.py 已註冊於 Read|Grep|Glob
 
 ENVIRONMENT STATUS: READY
 NEXT ACTION: 可以開始接受任務

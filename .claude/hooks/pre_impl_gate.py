@@ -6,6 +6,7 @@ import sys
 
 from path_policy import (
     CONFIG_PATH,
+    IMPLEMENTATION_PHASES,
     PolicyError,
     feature_spec_paths,
     implementation_context,
@@ -88,7 +89,7 @@ try:
 except (OSError, UnicodeError) as exc:
     print(f"BLOCKED [GATE:RED]: 無法讀取 {phase_file}: {exc}", file=sys.stderr)
     sys.exit(2)
-if phase not in ("RED_VERIFIED", "GREEN"):
+if phase not in IMPLEMENTATION_PHASES:
     print(
         f"BLOCKED [GATE:RED]: RED gate 未通過（phase={phase!r}）\n"
         f"  目前狀態不允許寫實作。\n"

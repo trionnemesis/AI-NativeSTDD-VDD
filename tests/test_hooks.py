@@ -514,6 +514,188 @@ class HookTests(unittest.TestCase):
             self.assertIn("started", captured.tail)
             self.assertLess(time.monotonic() - started, 30)
 
+    def test_read_isolation_guard_is_registered_for_read_tools(self):
+        settings = json.loads((ROOT / ".claude" / "settings.json").read_text())
+        entries = settings["hooks"]["PreToolUse"]
+
+        matched = [
+            entry
+            for entry in entries
+            if entry.get("matcher") == "Read|Grep|Glob"
+            and any(
+                "read_isolation_guard.py" in hook["command"] for hook in entry["hooks"]
+            )
+        ]
+
+        self.assertEqual(len(matched), 1, entries)
+
+    def test_read_isolation_guard_blocks_tests_during_implementation(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            base = Path(tmp)
+            write_policy(base, implementation_roots=["app"], test_roots=["checks"])
+            (base / ".vdd").mkdir(exist_ok=True)
+            (base / ".vdd" / "phase").write_text("RED_VERIFIED")
+
+            for payload in (
+                {"tool_name": "Read", "tool_input": {"file_path": "checks/test_a.py"}},
+                {"tool_name": "Grep", "tool_input": {"path": "checks"}},
+                {"tool_name": "Glob", "tool_input": {"pattern": "checks/**/*.py"}},
+                {"tool_name": "Read", "tool_input": {"file_path": "app/login.spec.ts"}},
+            ):
+                with self.subTest(payload=payload):
+                    result = run_hook(
+                        ".claude/hooks/read_isolation_guard.py", base, payload
+                    )
+                    self.assertEqual(result.returncode, 2, result.stderr)
+                    self.assertIn("agent_isolation_enforced", result.stderr)
+                    self.assertIn("lane=implementation", result.stderr)
+
+            # 實作側自己的檔案、Canonical Spec 與非測試路徑都必須維持可讀。
+            # 已知 over-match：實作側檔名含 test／spec 者會被預設 pattern 判為測試，
+            # 解法是收窄 test_file_patterns，見
+            # test_read_isolation_guard_honours_narrowed_test_file_patterns。
+            for payload in (
+                {"tool_name": "Read", "tool_input": {"file_path": "app/login.py"}},
+                {
+                    "tool_name": "Read",
+                    "tool_input": {"file_path": "specs/features/login.feature"},
+                },
+                {"tool_name": "Read", "tool_input": {"file_path": "README.md"}},
+                # configured roots 之外不猜：檔名含 spec 的文件不得被當成測試擋掉。
+                {
+                    "tool_name": "Read",
+                    "tool_input": {"file_path": "docs/02-canonical-spec.md"},
+                },
+            ):
+                with self.subTest(payload=payload):
+                    result = run_hook(
+                        ".claude/hooks/read_isolation_guard.py", base, payload
+                    )
+                    self.assertEqual(result.returncode, 0, result.stderr)
+
+    def test_read_isolation_guard_honours_narrowed_test_file_patterns(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            base = Path(tmp)
+            write_policy(
+                base,
+                implementation_roots=["app"],
+                test_roots=["checks"],
+                test_file_patterns=["*.spec.ts"],
+            )
+            (base / ".vdd").mkdir(exist_ok=True)
+            (base / ".vdd" / "phase").write_text("RED_VERIFIED")
+
+            # 預設 *test* pattern 會把這支實作誤判成測試；收窄 policy 是既有的解法。
+            allowed = run_hook(
+                ".claude/hooks/read_isolation_guard.py",
+                base,
+                {"tool_name": "Read", "tool_input": {"file_path": "app/testing.py"}},
+            )
+            blocked = run_hook(
+                ".claude/hooks/read_isolation_guard.py",
+                base,
+                {"tool_name": "Read", "tool_input": {"file_path": "app/login.spec.ts"}},
+            )
+
+            self.assertEqual(allowed.returncode, 0, allowed.stderr)
+            self.assertEqual(blocked.returncode, 2, blocked.stderr)
+
+    def test_read_isolation_guard_blocks_implementation_during_test_authoring(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            base = Path(tmp)
+            write_policy(base, implementation_roots=["app"], test_roots=["checks"])
+            (base / ".vdd").mkdir(exist_ok=True)
+            (base / ".vdd" / "phase").write_text("INIT")
+
+            blocked = run_hook(
+                ".claude/hooks/read_isolation_guard.py",
+                base,
+                {"tool_name": "Read", "tool_input": {"file_path": "app/login.py"}},
+            )
+            self.assertEqual(blocked.returncode, 2, blocked.stderr)
+            self.assertIn("lane=test_authoring", blocked.stderr)
+
+            # 這一側必須讀得到測試與 spec，否則寫不出測試。
+            for payload in (
+                {"tool_name": "Read", "tool_input": {"file_path": "checks/test_a.py"}},
+                {
+                    "tool_name": "Read",
+                    "tool_input": {"file_path": "specs/features/login.feature"},
+                },
+            ):
+                with self.subTest(payload=payload):
+                    result = run_hook(
+                        ".claude/hooks/read_isolation_guard.py", base, payload
+                    )
+                    self.assertEqual(result.returncode, 0, result.stderr)
+
+    def test_read_isolation_guard_defaults_to_test_authoring_without_phase(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            base = Path(tmp)
+            write_policy(base, implementation_roots=["app"], test_roots=["checks"])
+
+            result = run_hook(
+                ".claude/hooks/read_isolation_guard.py",
+                base,
+                {"tool_name": "Read", "tool_input": {"file_path": "app/login.py"}},
+            )
+
+            self.assertEqual(result.returncode, 2, result.stderr)
+            self.assertIn("lane=test_authoring", result.stderr)
+
+    def test_bash_guard_blocks_reading_the_isolated_side(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            base = Path(tmp)
+            write_policy(base, implementation_roots=["app"], test_roots=["checks"])
+            (base / ".vdd").mkdir(exist_ok=True)
+            phase = base / ".vdd" / "phase"
+
+            phase.write_text("RED_VERIFIED")
+            for command in (
+                "cat checks/test_a.py",
+                "head -n 20 checks/test_a.py",
+                "sed -n '1,5p' checks/test_a.py",
+                "grep -rn assert checks/",
+            ):
+                with self.subTest(phase="RED_VERIFIED", command=command):
+                    result = run_hook(
+                        ".claude/hooks/bash_guard.py",
+                        base,
+                        {"tool_input": {"command": command}},
+                    )
+                    self.assertEqual(result.returncode, 2, result.stderr)
+            allowed = run_hook(
+                ".claude/hooks/bash_guard.py",
+                base,
+                {"tool_input": {"command": "cat app/login.py"}},
+            )
+            self.assertEqual(allowed.returncode, 0, allowed.stderr)
+
+            phase.write_text("INIT")
+            blocked = run_hook(
+                ".claude/hooks/bash_guard.py",
+                base,
+                {"tool_input": {"command": "cat app/login.py"}},
+            )
+            self.assertEqual(blocked.returncode, 2, blocked.stderr)
+            allowed = run_hook(
+                ".claude/hooks/bash_guard.py",
+                base,
+                {"tool_input": {"command": "cat checks/test_a.py"}},
+            )
+            self.assertEqual(allowed.returncode, 0, allowed.stderr)
+
+    def test_setup_protocol_documents_the_read_side_guard(self):
+        protocol = (ROOT / "setup" / "AGENT_SETUP_PROTOCOL.md").read_text()
+
+        self.assertIn("CM-08", protocol)
+        self.assertIn("read_isolation_guard.py", protocol)
+        self.assertIn("8 個 .py 檔案", protocol)
+        self.assertEqual(
+            len(list((ROOT / ".claude" / "hooks").glob("*.py"))),
+            8,
+        )
+
     def test_managed_settings_remove_fixed_folder_and_agent_restrictions(self):
         managed = json.loads(
             (ROOT / "setup" / "templates" / "managed-settings.json").read_text()

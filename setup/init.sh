@@ -156,7 +156,7 @@ if [ "$TARGET_DIR" = "$SCRIPT_DIR" ]; then
 elif [ -d "$SCRIPT_DIR/.claude/hooks" ]; then
   cp "$SCRIPT_DIR/.claude/hooks/"*.py "$TARGET/.claude/hooks/"
   chmod +x "$TARGET/.claude/hooks/"*.py
-  echo "  Copied 6 hook entrypoints + path_policy.py"
+  echo "  Copied 7 hook entrypoints + path_policy.py"
 else
   echo "  WARN: $SCRIPT_DIR/.claude/hooks 不存在，跳過"
 fi
