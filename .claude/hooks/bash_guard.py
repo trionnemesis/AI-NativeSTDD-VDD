@@ -79,8 +79,11 @@ def split_tokens(segment):
 # grep/rg/ag 的第一個 positional 是 PATTERN，sed 是 script，awk 是程式碼——都不是路徑。
 # 把它們當路徑會誤擋 `rg checks app` 這種合法搜尋。
 PATTERN_FIRST_READERS = frozenset({"grep", "rg", "ag", "sed", "awk"})
-# 不給路徑時遞迴搜尋 cwd，因此「沒有 operand」本身就是一個 scope。
-SEARCH_READERS = frozenset({"grep", "rg", "ag"})
+# 不給路徑時遞迴搜尋 cwd 的 reader；「沒有 operand」對它們本身就是一個 scope。
+# grep 例外：GNU grep 只有在 recursive 時才讀 "."，否則讀 stdin，
+# 把 `printf X | grep X` 當成 repo 全域搜尋是誤擋。
+IMPLICIT_CWD_READERS = frozenset({"rg", "ag"})
+RECURSIVE_GREP_OPTIONS = frozenset({"-r", "-R", "--recursive", "--dereference-recursive"})
 # 選項 arity 必須逐命令定義：cat -e／-t 是顯示旗標，套用 grep 的 arity 會把
 # 檔案 operand 當成選項值吃掉。少宣告只會多出幾個 other 分類的 operand（無害），
 # 多宣告會吃掉真正的路徑（有害），因此只為確實吃值的 reader 宣告。
@@ -108,6 +111,11 @@ COMMAND_PREFIXES = {
     "nohup": "",
     "nice": "n",
     "sudo": "u",
+    # shell 控制關鍵字後面接的是要執行的命令列表。
+    "if": "",
+    "elif": "",
+    "while": "",
+    "until": "",
     "then": "",
     "do": "",
     "else": "",
@@ -236,6 +244,23 @@ def path_operands(name, tokens):
     return operands + file_values
 
 
+def implicit_cwd_scope(name, tokens):
+    """不帶路徑 operand 時，這次呼叫是否會遞迴搜尋 cwd。"""
+    if name in IMPLICIT_CWD_READERS:
+        return True
+    if name != "grep":
+        return False
+    return any(
+        token in RECURSIVE_GREP_OPTIONS
+        or (
+            token.startswith("-")
+            and not token.startswith("--")
+            and any(letter in "rR" for letter in token[1:])
+        )
+        for token in tokens
+    )
+
+
 def read_targets(shell_command, root):
     """回傳 reader command 的引數，並追蹤同一行內的 cd。
 
@@ -248,7 +273,11 @@ def read_targets(shell_command, root):
     cwds = [root]
     # 換行在 shell 裡也是 command separator；<( 與 >( 是 process substitution，
     # 其括號內是另一個完整命令，與 $( 一樣要當成獨立 segment。
-    for segment in re.split(r"[|;&\n\r]+|[<>]\(|\$\(|\)|`", shell_command):
+    # 保留分隔符是為了知道 segment 是不是接在 pipe 之後——那代表它讀 stdin。
+    parts = re.split(r"([|;&\n\r]+|[<>]\(|\$\(|\)|`)", shell_command)
+    for position, segment in enumerate(parts[::2]):
+        separator = parts[2 * position - 1] if position else ""
+        piped = "|" in separator
         tokens = split_tokens(segment)
         # 重導向可能出現在命令名之前（<file cat），所以掃整個 segment。
         # 重導向讓任何命令都讀得到檔案，與命令是不是 reader 無關。
@@ -262,14 +291,16 @@ def read_targets(shell_command, root):
             if opaque:
                 cwds = [root]
             else:
-                cwds = ([root] if root in cwds else []) + [
-                    candidate / destinations[0] for candidate in cwds
-                ]
-                cwds = cwds[-CWD_CANDIDATE_LIMIT:]
+                # cd 可能失敗，所以每個既有候選都要保留，再加上它的成功目的地。
+                cwds = list(
+                    dict.fromkeys(
+                        cwds + [candidate / destinations[0] for candidate in cwds]
+                    )
+                )[:CWD_CANDIDATE_LIMIT]
         elif name in READ_COMMANDS:
             arguments += path_operands(name, remaining)
-        if not arguments and name in SEARCH_READERS:
-            # rg／grep 不帶路徑時遞迴搜尋 cwd，那就是這次搜尋的 scope。
+        if not arguments and not piped and implicit_cwd_scope(name, remaining):
+            # 這些 reader 不帶路徑時遞迴搜尋 cwd，那就是這次搜尋的 scope。
             arguments = ["."]
         for argument in arguments:
             if Path(argument).is_absolute():

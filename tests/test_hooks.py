@@ -1349,6 +1349,81 @@ class HookTests(unittest.TestCase):
                     )
                     self.assertEqual(result.returncode, 0, result.stderr)
 
+    def test_bash_guard_limits_implicit_cwd_scope_to_recursive_search(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            base = Path(tmp)
+            write_policy(base, implementation_roots=["app"], test_roots=["checks"])
+            (base / "app").mkdir()
+            (base / "checks").mkdir()
+            (base / ".vdd" / "phase").write_text("RED_VERIFIED")
+
+            # 非遞迴 grep 讀 stdin 而不是 cwd；把管線當成 repo 全域搜尋是誤擋
+            for command in ("printf SECRET | grep SECRET", "echo hi | grep hi"):
+                with self.subTest(allowed=command):
+                    result = run_hook(
+                        ".claude/hooks/bash_guard.py",
+                        base,
+                        {"tool_input": {"command": command}},
+                    )
+                    self.assertEqual(result.returncode, 0, result.stderr)
+
+            for command in ("grep -r SECRET", "rg SECRET"):
+                with self.subTest(blocked=command):
+                    result = run_hook(
+                        ".claude/hooks/bash_guard.py",
+                        base,
+                        {"tool_input": {"command": command}},
+                    )
+                    self.assertEqual(result.returncode, 2, result.stderr)
+
+    def test_bash_guard_unwraps_shell_control_keywords(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            base = Path(tmp)
+            write_policy(base, implementation_roots=["app"], test_roots=["checks"])
+            (base / "app").mkdir()
+            (base / "checks").mkdir()
+            (base / ".vdd" / "phase").write_text("RED_VERIFIED")
+
+            for command in (
+                "if cat checks/secret.py; then :; fi",
+                "while cat checks/secret.py; do :; done",
+                "until cat checks/secret.py; do :; done",
+            ):
+                with self.subTest(command=command):
+                    result = run_hook(
+                        ".claude/hooks/bash_guard.py",
+                        base,
+                        {"tool_input": {"command": command}},
+                    )
+                    self.assertEqual(result.returncode, 2, result.stderr)
+
+    def test_bash_guard_keeps_every_prior_cwd_candidate(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            base = Path(tmp)
+            write_policy(base, implementation_roots=["app"], test_roots=["checks"])
+            (base / "app").mkdir()
+            (base / "checks").mkdir()
+            (base / ".vdd" / "phase").write_text("RED_VERIFIED")
+
+            # 第二個 cd 失敗時 shell 留在 app/，相對路徑要以 app/ 解析才抓得到
+            blocked = run_hook(
+                ".claude/hooks/bash_guard.py",
+                base,
+                {
+                    "tool_input": {
+                        "command": "cd app && cd missing/nested || cat ../checks/secret.py"
+                    }
+                },
+            )
+            allowed = run_hook(
+                ".claude/hooks/bash_guard.py",
+                base,
+                {"tool_input": {"command": "cd app && cat login.py"}},
+            )
+
+            self.assertEqual(blocked.returncode, 2, blocked.stderr)
+            self.assertEqual(allowed.returncode, 0, allowed.stderr)
+
     def test_setup_protocol_documents_the_read_side_guard(self):
         protocol = (ROOT / "setup" / "AGENT_SETUP_PROTOCOL.md").read_text()
 
