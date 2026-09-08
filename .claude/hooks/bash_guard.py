@@ -63,8 +63,13 @@ READ_COMMANDS = frozenset(
     }
 )
 CD_COMMANDS = frozenset({"cd", "pushd", "chdir"})
-# 每個 cd 都可能成功或失敗，候選 cwd 會累積；設上限避免爆炸。
+# cd 的成敗不必用假設分支去猜：目錄存不存在是可以直接觀測的事實。
+# 只有當同一行內可能先建立目錄時，才需要同時保留成功與失敗兩條分支，
+# 那時候候選才會累積，因此仍保留上限。
 CWD_CANDIDATE_LIMIT = 8
+DIRECTORY_CREATING_COMMANDS = re.compile(
+    r"\b(?:mkdir|install|git|tar|unzip|cp|mv|rsync)\b"
+)
 # 這些字元出現在 cd 的引數裡就無法靜態判定目的地。
 OPAQUE_CD_ARGUMENT = ("$", "`", "~", "*", "?")
 
@@ -96,13 +101,23 @@ READER_OPTIONS = {
 }
 NO_VALUE_OPTIONS = {"value": "", "pattern": "", "file": ""}
 PATTERN_LONG_OPTIONS = frozenset({"--regexp", "--file", "--expression"})
-# --exclude-from 不提供搜尋 pattern，但 grep 仍會開啟並讀取這個檔案。
-FILE_LONG_OPTIONS = frozenset({"--file", "--exclude-from", "--include-from"})
+# 這些選項不提供搜尋 pattern，但命令仍會開啟並讀取該檔案，其內容也會
+# 改變可觀察的搜尋結果，因此一律計入 read target。
+# 依本機 rg 14.1.0 --help：`--ignore-file=PATH` 載入 gitignore 格式的規則。
+FILE_LONG_OPTIONS = frozenset(
+    {"--file", "--exclude-from", "--include-from", "--ignore-file"}
+)
 VALUE_LONG_OPTIONS = PATTERN_LONG_OPTIONS | FILE_LONG_OPTIONS | frozenset(
     {"--max-count", "--include", "--exclude", "--glob", "--type"}
 )
 # rg 的這些模式沒有 pattern operand，第一個 positional 就是路徑。
-NO_PATTERN_OPTIONS = frozenset({"--files", "--type-list", "--help", "--version"})
+NO_PATTERN_LONG_OPTIONS = frozenset({"--files", "--type-list", "--help", "--version"})
+# 這幾個只印出資訊、完全不碰檔案系統，因此連 implicit cwd scope 都不該套用。
+# --files 不在此列——它仍會列舉 cwd 底下的檔案。
+NO_SEARCH_LONG_OPTIONS = frozenset({"--type-list", "--help", "--version"})
+# 短旗標的語意逐命令不同（grep -h 是 --no-filename），只為已驗證的命令宣告。
+# 依本機 rg 14.1.0 --help：`-h, --help`、`-V, --version`。
+NO_SEARCH_SHORT_OPTIONS = {"rg": "hV"}
 # 分組語法與 command prefix 必須先剝掉，否則 (cat x 的命令名會是 "(cat"。
 # prefix 自己的選項也要吃掉，否則 command -p cat x 的命令名會變成 "-p"。
 COMMAND_PREFIXES = {
@@ -127,6 +142,34 @@ GROUPING_CHARACTERS = "({!"
 # 輸入重導向：<file、0<file、<>file（讀寫）。
 # << 是 heredoc（其後是分隔字串不是路徑），<& 是 fd 複製，兩者排除。
 INPUT_REDIRECTION = re.compile(r"^(\d*)<>?(?![<&])(.*)$")
+# <<WORD 是 heredoc、<<<WORD 是 here-string；兩者的 operand 都是字串不是路徑，
+# 當成 operand 會讓 grep SECRET <<< 'checks' 被誤判成搜尋測試側。
+HERE_DOCUMENT = re.compile(r"^\d*<<<?(.*)$")
+# 輸出重導向：>file、>>file、2>file。>& 是 fd 複製不是路徑。
+OUTPUT_REDIRECTION = re.compile(r"^\d*>>?(?![&])(.*)$")
+QUOTE_CHARACTERS = "\"'"
+# shell word 的結束字元；重導向目標讀到這些字元就停。
+WORD_TERMINATORS = frozenset(" \t\n\r|;&<>()")
+
+
+def _prefix_consumes_next(token, prefix_options):
+    """prefix 的這個選項是否把下一個 token 當成值吃掉。
+
+    -uPATH／-n10 的值已經黏在同一個 token 上，下一個 token 是要執行的命令；
+    再吃掉它會讓 env -uPATH cat x 的命令名變成 x，整個 reader 判定失效。
+    """
+    if not prefix_options:
+        return False
+    if token.startswith("--"):
+        return "=" not in token and any(
+            letter in prefix_options for letter in token[2:]
+        )
+    letters = token[1:]
+    for position, letter in enumerate(letters, start=1):
+        if letter in prefix_options:
+            # 吃值的字母必須是叢集的最後一個，值才會落在下一個 token。
+            return position == len(letters)
+    return False
 
 
 def segment_command(tokens):
@@ -136,16 +179,21 @@ def segment_command(tokens):
     while index < len(tokens):
         raw = tokens[index]
         token = raw.lstrip(GROUPING_CHARACTERS)
-        if not token or INPUT_REDIRECTION.match(token) or token.startswith(">"):
+        if (
+            not token
+            or INPUT_REDIRECTION.match(token)
+            or HERE_DOCUMENT.match(token)
+            or OUTPUT_REDIRECTION.match(token)
+        ):
             # 前置重導向不是命令名；其目標由 redirection_targets 另外抽取。
             index += 1
             continue
         if "=" in token and not token.startswith("-"):
             index += 1
             continue
-        if token.startswith("-") and prefix_options is not None and token != "-":
-            # prefix 自己的選項；吃值的選項要連值一起跳過。
-            if any(letter in prefix_options for letter in token[1:]) and "=" not in token:
+        if token.startswith("-") and token != "-":
+            # prefix 自己的選項；只有在值沒有黏在同一個 token 上時才吃下一個。
+            if _prefix_consumes_next(token, prefix_options):
                 index += 1
             index += 1
             continue
@@ -158,22 +206,91 @@ def segment_command(tokens):
     return None, []
 
 
-def redirection_targets(tokens):
-    """取出附著式輸入重導向的檔案；重導向讓任何命令都變成 reader。"""
-    targets = []
-    index = 0
-    while index < len(tokens):
-        match = INPUT_REDIRECTION.match(tokens[index])
-        index += 1
-        if match is None:
+def _quoted_segment(text, index):
+    """回傳 (引號內的內容, 結束引號之後的位置)；引號未閉合時吃到文字結尾。"""
+    quote = text[index]
+    index += 1
+    inner = []
+    while index < len(text):
+        character = text[index]
+        if character == "\\" and quote == '"' and index + 1 < len(text):
+            inner.append(text[index + 1])
+            index += 2
             continue
-        attached = match.group(2)
-        if attached:
-            targets.append(attached)
-        elif index < len(tokens):
-            targets.append(tokens[index])
+        if character == quote:
+            return "".join(inner), index + 1
+        inner.append(character)
+        index += 1
+    return "".join(inner), index
+
+
+def _read_word(text, index):
+    """從 index 讀出一個 shell word（去掉引號），回傳 (word, next_index)。"""
+    while index < len(text) and text[index] in " \t":
+        index += 1
+    word = []
+    while index < len(text):
+        character = text[index]
+        if character == "\\" and index + 1 < len(text):
+            word.append(text[index + 1])
+            index += 2
+            continue
+        if character in QUOTE_CHARACTERS:
+            inner, index = _quoted_segment(text, index)
+            word.append(inner)
+            continue
+        if character in WORD_TERMINATORS:
+            break
+        word.append(character)
+        index += 1
+    return "".join(word), index
+
+
+def redirection_targets(segment):
+    """回傳 (讀取目標, 寫入目標)；重導向讓任何命令都變成 reader 或 writer。
+
+    必須在原始文字上判定，不能用 shlex 的 token：shlex 已經把引號拿掉，
+    printf '%s' '<checks/x' 這種純字串會與真正的重導向無法區分，
+    當成重導向就是誤擋。
+    """
+    reads = []
+    writes = []
+    index = 0
+    while index < len(segment):
+        character = segment[index]
+        if character == "\\":
+            index += 2
+            continue
+        if character in QUOTE_CHARACTERS:
+            _, index = _quoted_segment(segment, index)
+            continue
+        if character not in "<>":
             index += 1
-    return targets
+            continue
+        following = segment[index + 1:index + 2]
+        if character == "<":
+            if segment.startswith("<<<", index):
+                # here-string 的 operand 是字串不是檔案。
+                _, index = _read_word(segment, index + 3)
+                continue
+            if following in ("<", "&", "("):
+                # heredoc 的 operand 是分隔字串，<& 是 fd 複製，
+                # <( 由 segment 切割處理。
+                index += 2
+                continue
+            index += 2 if following == ">" else 1  # <> 是讀寫
+            target, index = _read_word(segment, index)
+            if target:
+                reads.append(target)
+            continue
+        if following in ("&", "("):
+            index += 2
+            continue
+        index += 2 if following == ">" else 1  # >> 是追加
+        target, index = _read_word(segment, index)
+        if target:
+            writes.append(target)
+    return reads, writes
 
 
 def _long_option(token, tokens, index):
@@ -213,6 +330,34 @@ def _short_options(token, tokens, index, options):
     return supplied, file_value, index
 
 
+def _has_option(tokens, long_options, short_letters):
+    for token in tokens:
+        if token.split("=", 1)[0] in long_options:
+            return True
+        if (
+            short_letters
+            and token.startswith("-")
+            and not token.startswith("--")
+            and any(letter in short_letters for letter in token[1:])
+        ):
+            return True
+    return False
+
+
+def no_pattern_mode(name, tokens):
+    """這次呼叫是否沒有 pattern operand（第一個 positional 就是路徑）。"""
+    return _has_option(
+        tokens, NO_PATTERN_LONG_OPTIONS, NO_SEARCH_SHORT_OPTIONS.get(name, "")
+    )
+
+
+def no_search_mode(name, tokens):
+    """這次呼叫是否只印出資訊、完全不讀檔案系統。"""
+    return _has_option(
+        tokens, NO_SEARCH_LONG_OPTIONS, NO_SEARCH_SHORT_OPTIONS.get(name, "")
+    )
+
+
 def path_operands(name, tokens):
     """從 reader 的引數取出真正的路徑 operand。
 
@@ -229,6 +374,17 @@ def path_operands(name, tokens):
         if token == "--":
             operands.extend(item for item in tokens[index:] if item)
             break
+        here = HERE_DOCUMENT.match(token)
+        if here:
+            if not here.group(1) and index < len(tokens):
+                index += 1  # 分隔字串／字串 operand 落在下一個 token
+            continue
+        output = OUTPUT_REDIRECTION.match(token)
+        if output:
+            # 輸出重導向的目標是寫入而不是讀取，由 redirection_targets 另外分類。
+            if not output.group(1) and index < len(tokens):
+                index += 1
+            continue
         if INPUT_REDIRECTION.match(token):
             continue  # 重導向由 redirection_targets 單獨處理
         if not token.startswith("-") or token == "-":
@@ -242,13 +398,10 @@ def path_operands(name, tokens):
         pattern_supplied = pattern_supplied or supplied
         if file_value:
             file_values.append(file_value)
-    no_pattern_mode = any(
-        token.split("=", 1)[0] in NO_PATTERN_OPTIONS for token in tokens
-    )
     if (
         name in PATTERN_FIRST_READERS
         and not pattern_supplied
-        and not no_pattern_mode
+        and not no_pattern_mode(name, tokens)
         and operands
     ):
         operands = operands[1:]
@@ -257,6 +410,9 @@ def path_operands(name, tokens):
 
 def implicit_cwd_scope(name, tokens):
     """不帶路徑 operand 時，這次呼叫是否會遞迴搜尋 cwd。"""
+    if no_search_mode(name, tokens):
+        # rg --help／--version／--type-list 只印出資訊，沒有 cwd scope 可言。
+        return False
     if name in IMPLICIT_CWD_READERS:
         return True
     if name != "grep":
@@ -272,17 +428,26 @@ def implicit_cwd_scope(name, tokens):
     )
 
 
-def read_targets(shell_command, root):
-    """回傳 reader command 的引數，並追蹤同一行內的 cd。
+def _resolve(argument, cwds):
+    """相對路徑要對每個候選 cwd 各解析一次。"""
+    if Path(argument).is_absolute():
+        return [argument]
+    return [os.path.normpath(str(candidate / argument)) for candidate in cwds]
+
+
+def shell_targets(shell_command, root):
+    """回傳 (讀取目標, 寫入目標)，並追蹤同一行內的 cd。
 
     cd 目的地無法靜態判定時，退回以 repository root 解析而不是擋下：這支 guard
     也會掃到 heredoc 與引號內的文字，把「判不出來」一律當成違規會讓整行後續的
     reader 全部誤判。shell 是開放式的，這是 best-effort，不是安全邊界。
     """
     targets = []
-    # cd 可能失敗，shell 會留在原目錄，所以候選 cwd 是一組而不是一個。
-    # success_cwd 是「每個 cd 都成功」的路徑，也是最可能的真實 cwd，
-    # 截斷候選時必須優先保留它，否則長鏈 cd 會把真正的位置擠掉。
+    written = []
+    # cd 到不存在的目錄一定失敗，這是可以直接觀測的事實，不必用假設分支去猜。
+    # 例外是同一行內可能先建立目錄，那時才保留成功與失敗兩條分支。
+    may_create = DIRECTORY_CREATING_COMMANDS.search(shell_command) is not None
+    # success_cwd 是「每個 cd 都成功」的路徑；分支展開時優先保留它。
     success_cwd = root
     cwds = [root]
     # 換行在 shell 裡也是 command separator；<( 與 >( 是 process substitution，
@@ -295,7 +460,7 @@ def read_targets(shell_command, root):
         tokens = split_tokens(segment)
         # 重導向可能出現在命令名之前（<file cat），所以掃整個 segment。
         # 重導向讓任何命令都讀得到檔案，與命令是不是 reader 無關。
-        arguments = redirection_targets(tokens)
+        arguments, redirected = redirection_targets(segment)
         name, remaining = segment_command(tokens)
         if name in CD_COMMANDS:
             destinations = path_operands(name, remaining)
@@ -306,28 +471,30 @@ def read_targets(shell_command, root):
                 success_cwd = root
                 cwds = [root]
             else:
-                # cd 可能失敗，所以每個既有候選都要保留，再加上它的成功目的地。
-                success_cwd = success_cwd / destinations[0]
-                cwds = list(
-                    dict.fromkeys(
-                        [success_cwd, root]
-                        + cwds
-                        + [candidate / destinations[0] for candidate in cwds]
-                    )
-                )[:CWD_CANDIDATE_LIMIT]
+                destination = destinations[0]
+                success_cwd = success_cwd / destination
+                candidates = [success_cwd, root] if may_create else []
+                for candidate in cwds:
+                    reached = candidate / destination
+                    if reached.is_dir():
+                        # 目錄存在，cd 必定成功；沒有失敗分支要保留。
+                        candidates.append(reached)
+                    elif may_create:
+                        # 成功分支緊接在自己的失敗分支之前，截斷不會只留下其中一邊。
+                        candidates.extend([reached, candidate])
+                    else:
+                        candidates.append(candidate)
+                cwds = list(dict.fromkeys(candidates))[:CWD_CANDIDATE_LIMIT]
         elif name in READ_COMMANDS:
             arguments += path_operands(name, remaining)
         if not arguments and not piped and implicit_cwd_scope(name, remaining):
             # 這些 reader 不帶路徑時遞迴搜尋 cwd，那就是這次搜尋的 scope。
             arguments = ["."]
         for argument in arguments:
-            if Path(argument).is_absolute():
-                targets.append(argument)
-                continue
-            targets.extend(
-                os.path.normpath(str(candidate / argument)) for candidate in cwds
-            )
-    return targets
+            targets.extend(_resolve(argument, cwds))
+        for argument in redirected:
+            written.extend(_resolve(argument, cwds))
+    return targets, written
 
 
 # 被隔離的那一側不存在時（例如本 governance repository 沒有 src/），
@@ -335,12 +502,19 @@ def read_targets(shell_command, root):
 forbidden = forbidden_side(phase)
 if forbidden is not None and isolated_side_exists(policy, forbidden, root):
     side_label = "測試" if forbidden == "test" else "實作"
-    for target in read_targets(command, root):
+    reads, writes = shell_targets(command, root)
+    for target in reads:
         if classify_path(target, policy) == forbidden:
             read_violations.append(f"讀取 {target}（{side_label}側）")
         elif scope_reaches_forbidden(target, policy, forbidden):
             # 目錄 operand 會被遞迴搜尋，`rg SECRET .` 一樣讀得到隔離側。
             read_violations.append(f"搜尋範圍 {target} 涵蓋{side_label}側")
+    for target in writes:
+        # 重導向到被隔離的一側是寫入，不是讀取；標成「讀取」會誤導 agent
+        # 去找根本不存在的讀取行為。governed_roots 的 pattern 不涵蓋 test_roots，
+        # 這裡是它唯一會被攔下的地方。
+        if classify_path(target, policy) == forbidden:
+            read_violations.append(f"重導向寫入 {target}（{side_label}側）")
 
 violations = [label for pattern, label in patterns if re.search(pattern, command)]
 violations.extend(read_violations)
