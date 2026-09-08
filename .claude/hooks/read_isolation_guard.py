@@ -8,11 +8,13 @@
 # Canonical Spec 兩側都必須可讀——它是雙方共同的約束來源。
 import json
 import sys
+from pathlib import PurePosixPath
 
 from path_policy import (
     PolicyError,
     classify_path,
     forbidden_side,
+    isolated_side_exists,
     load_policy,
     read_lane,
     read_phase,
@@ -37,26 +39,52 @@ LANE_RULES = {
 }
 
 
-def candidate_paths(tool_name, tool_input):
-    """取出該 tool 可判定的 path-ish 輸入；判不出來的欄位一律不猜。"""
-    if tool_name == "Read":
-        values = [tool_input.get("file_path")]
-    elif tool_name == "Glob":
-        values = [tool_input.get("path"), tool_input.get("pattern")]
-    elif tool_name == "Grep":
-        values = [tool_input.get("path"), tool_input.get("glob")]
-    else:
-        values = []
-    return [value for value in values if isinstance(value, str) and value]
+WILDCARD_CHARS = "*?["
+
+
+def text_field(tool_input, name):
+    value = tool_input.get(name)
+    return value if isinstance(value, str) and value else None
+
+
+def literal_prefix(pattern):
+    """回傳 pattern 中第一個 wildcard segment 之前的字面前綴。"""
+    parts = []
+    for part in PurePosixPath(pattern).parts:
+        if any(character in part for character in WILDCARD_CHARS):
+            break
+        parts.append(part)
+    return "/".join(parts)
 
 
 def forbidden_target(tool_name, tool_input, policy, phase):
+    """回傳 (target, reason)；None 代表放行。"""
     forbidden = forbidden_side(phase)
     if forbidden is None:
         return None
-    for value in candidate_paths(tool_name, tool_input):
-        if classify_path(value, policy) == forbidden:
-            return value
+
+    if tool_name == "Read":
+        value = text_field(tool_input, "file_path")
+        if value and classify_path(value, policy) == forbidden:
+            return value, "forbidden"
+        return None
+
+    base = text_field(tool_input, "path")
+    if base and classify_path(base, policy) == forbidden:
+        return base, "forbidden"
+
+    # Glob 的 pattern 本身就是 path glob；Grep 的 glob 只是檔名 filter。
+    pattern = text_field(tool_input, "pattern" if tool_name == "Glob" else "glob")
+    prefix = literal_prefix(pattern) if pattern else ""
+    if prefix:
+        anchored = f"{base}/{prefix}" if base else prefix
+        if classify_path(anchored, policy) == forbidden:
+            return anchored, "forbidden"
+
+    # 既沒有 path 也沒有字面前綴 → 例如 **/checks/**/*.py 或不帶 path 的 Grep。
+    # 這種 pattern 能穿進被隔離的那一側，而 hook 無法證明它不會，因此保守擋下。
+    if base is None and not prefix and isolated_side_exists(policy, forbidden):
+        return (pattern or "<no path>"), "unanchored"
     return None
 
 
@@ -70,16 +98,29 @@ def main():
     try:
         policy = load_policy()
         phase = read_phase()
-        target = forbidden_target(tool_name, tool_input, policy, phase)
+        outcome = forbidden_target(tool_name, tool_input, policy, phase)
     except PolicyError as exc:
         print(f"BLOCKED [PATH POLICY]: {exc}", file=sys.stderr)
         return 2
 
-    if target is None:
+    if outcome is None:
         return 0
 
+    target, reason = outcome
     lane = read_lane(phase)
     rule = LANE_RULES[lane]
+    if reason == "unanchored":
+        print(
+            "BLOCKED [GATE:RED agent_isolation_enforced]: 未錨定的搜尋範圍。\n"
+            f"  tool: {tool_name}\n"
+            f"  pattern: {target}\n"
+            f"  phase: {phase!r}（lane={lane}）\n"
+            "  這個 pattern 能穿進被隔離的一側，hook 無法證明它不會。\n"
+            "  請以 path= 指定搜尋根目錄，或給 pattern 一個字面前綴。",
+            file=sys.stderr,
+        )
+        return 2
+
     escape = (
         f"  需要失敗細節請改讀 {red_evidence_root(policy)}/ 下的 Red Evidence"
         "（failure_message／failure_location）。\n"

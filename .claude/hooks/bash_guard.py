@@ -3,15 +3,17 @@
 # and common Bash reads from bypassing the read-side isolation guard.
 # Shell 是開放式的，pattern 比對只擋得住常見寫法；真正的隔離仍靠 role separation。
 import json
+import os
 import re
 import shlex
 import sys
-from pathlib import PurePosixPath
+from pathlib import Path, PurePosixPath
 
 from path_policy import (
     PolicyError,
     classify_path,
     forbidden_side,
+    isolated_side_exists,
     load_policy,
     project_root,
     read_phase,
@@ -59,6 +61,9 @@ READ_COMMANDS = frozenset(
         "strings", "grep", "rg", "ag", "awk", "sed",
     }
 )
+CD_COMMANDS = frozenset({"cd", "pushd", "chdir"})
+# 這些字元出現在 cd 的引數裡就無法靜態判定目的地。
+OPAQUE_CD_ARGUMENT = ("$", "`", "~", "*", "?")
 
 
 def split_tokens(segment):
@@ -68,29 +73,54 @@ def split_tokens(segment):
         return segment.split()
 
 
-def read_targets(shell_command):
-    """取出 reader command 後面的引數 token。shell 是開放式的，這是 best-effort。"""
+def segment_command(tokens):
+    """跳過前置 env assignment，回傳 (command_name, positional_arguments)。"""
+    index = 0
+    while index < len(tokens) and "=" in tokens[index] and not tokens[index].startswith("-"):
+        index += 1
+    if index >= len(tokens):
+        return None, []
+    arguments = [
+        token for token in tokens[index + 1:] if token and not token.startswith("-")
+    ]
+    return PurePosixPath(tokens[index]).name, arguments
+
+
+def read_targets(shell_command, root):
+    """回傳 reader command 的引數，並追蹤同一行內的 cd。
+
+    cd 目的地無法靜態判定時，退回以 repository root 解析而不是擋下：這支 guard
+    也會掃到 heredoc 與引號內的文字，把「判不出來」一律當成違規會讓整行後續的
+    reader 全部誤判。shell 是開放式的，這是 best-effort，不是安全邊界。
+    """
     targets = []
+    cwd = root
     for segment in re.split(r"[|;&]+|\$\(|\)|`", shell_command):
-        tokens = split_tokens(segment)
-        index = 0
-        # 跳過前置的 env assignment（FOO=bar cat ...）
-        while index < len(tokens) and "=" in tokens[index] and not tokens[index].startswith("-"):
-            index += 1
-        if index >= len(tokens):
+        name, arguments = segment_command(split_tokens(segment))
+        if name is None:
             continue
-        if PurePosixPath(tokens[index]).name not in READ_COMMANDS:
+        if name in CD_COMMANDS:
+            opaque = not arguments or arguments[0] == "-" or any(
+                character in arguments[0] for character in OPAQUE_CD_ARGUMENT
+            )
+            cwd = root if opaque else cwd / arguments[0]
             continue
-        targets.extend(
-            token for token in tokens[index + 1:] if token and not token.startswith("-")
-        )
+        if name not in READ_COMMANDS:
+            continue
+        for argument in arguments:
+            if Path(argument).is_absolute():
+                targets.append(argument)
+            else:
+                targets.append(os.path.normpath(str(cwd / argument)))
     return targets
 
 
+# 被隔離的那一側不存在時（例如本 governance repository 沒有 src/），
+# 沒有東西可讀，整段 read 判定跳過。
 forbidden = forbidden_side(phase)
-if forbidden is not None:
+if forbidden is not None and isolated_side_exists(policy, forbidden, root):
     side_label = "測試" if forbidden == "test" else "實作"
-    for target in read_targets(command):
+    for target in read_targets(command, root):
         if classify_path(target, policy) == forbidden:
             read_violations.append(f"讀取 {target}（{side_label}側）")
 

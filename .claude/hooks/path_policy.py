@@ -201,6 +201,21 @@ def load_policy(path: Path | None = None) -> dict[str, Any]:
     return policy
 
 
+def isolated_side_exists(
+    policy: dict[str, Any], forbidden: str, root: Path | None = None
+) -> bool:
+    """Whether the isolated side actually exists in this repository.
+
+    When it does not, nothing can be reached and the guards stay inert — otherwise
+    this governance repository, which has no src/, would block its own searches.
+    """
+    roots = (
+        policy["test_roots"] if forbidden == "test" else policy["implementation_roots"]
+    )
+    base = root or project_root()
+    return any((base / candidate).is_dir() for candidate in roots)
+
+
 def read_lane(phase: str | None) -> str:
     """Return the read-side lane implied by the governance phase."""
     return READ_LANE_BY_PHASE.get(phase, DEFAULT_READ_LANE)

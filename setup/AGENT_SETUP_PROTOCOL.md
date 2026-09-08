@@ -88,6 +88,21 @@ read isolation 由下一輪 RED 驗證（phase 轉回 `RED_VERIFIED`）重新武
 這段期間沒有 read isolation。補上 task-boundary 的 phase 復位會同時改變
 `GATE:RED` 的寫入語意，屬於 governance 決策，不在 hook 層自行決定。
 
+`Grep`／`Glob` 必須錨定搜尋範圍：給 `path=`，或讓 pattern 有字面前綴。
+`**/checks/**/*.py` 這種能穿進被隔離一側、hook 又無法證明它不會的 pattern
+一律擋下。被隔離的那一側在 repository 內不存在時（例如尚未建立 `tests/`），
+兩支 guard 的 read 判定都跳過——沒有東西可讀，擋了只是誤傷。
+
+Bash 側會追蹤同一行內的 `cd`，`cd app && cat ../checks/test_a.py` 會以新的
+cwd 解析後判定。`cd` 目的地無法靜態判定時（`$VAR`、`-`、glob）退回以
+repository root 解析，**不**擋下：這支 guard 也會掃到 heredoc 與引號內的文字，
+把「判不出來」一律當違規會讓整行後續的 reader 全部誤判。代價是判不出來的 `cd`
+之後、指向被隔離一側的相對路徑可能漏掉——已知殘留，不是安全邊界。
+
+**判定粒度是目錄。** co-located test（`app/login.spec.ts`）在 `Read` 與 Bash
+單檔讀取上擋得住，但錨定到 `app/` 的搜尋無法逐檔排除它。需要嚴格隔離的專案
+應以 `test_roots` 分離目錄，而不是依賴 `test_file_patterns`。
+
 **任何項目 FAIL → 進入 Configure Mode 執行對應 Phase**
 
 ---
