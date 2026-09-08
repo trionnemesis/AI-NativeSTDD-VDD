@@ -63,6 +63,8 @@ READ_COMMANDS = frozenset(
     }
 )
 CD_COMMANDS = frozenset({"cd", "pushd", "chdir"})
+# 每個 cd 都可能成功或失敗，候選 cwd 會累積；設上限避免爆炸。
+CWD_CANDIDATE_LIMIT = 8
 # 這些字元出現在 cd 的引數裡就無法靜態判定目的地。
 OPAQUE_CD_ARGUMENT = ("$", "`", "~", "*", "?")
 
@@ -96,27 +98,49 @@ VALUE_LONG_OPTIONS = PATTERN_LONG_OPTIONS | frozenset(
     {"--max-count", "--include", "--exclude", "--glob", "--type"}
 )
 # 分組語法與 command prefix 必須先剝掉，否則 (cat x 的命令名會是 "(cat"。
-COMMAND_PREFIXES = frozenset(
-    {"command", "builtin", "exec", "env", "time", "nohup", "nice", "sudo", "then", "do", "else"}
-)
+# prefix 自己的選項也要吃掉，否則 command -p cat x 的命令名會變成 "-p"。
+COMMAND_PREFIXES = {
+    "command": "",
+    "builtin": "",
+    "exec": "",
+    "env": "u",
+    "time": "",
+    "nohup": "",
+    "nice": "n",
+    "sudo": "u",
+    "then": "",
+    "do": "",
+    "else": "",
+}
 GROUPING_CHARACTERS = "({!"
-# 附著式輸入重導向：<file、0<file。<< 是 heredoc，其後是分隔字串不是路徑。
-INPUT_REDIRECTION = re.compile(r"^(\d*)<(?![<&])(.*)$")
+# 輸入重導向：<file、0<file、<>file（讀寫）。
+# << 是 heredoc（其後是分隔字串不是路徑），<& 是 fd 複製，兩者排除。
+INPUT_REDIRECTION = re.compile(r"^(\d*)<>?(?![<&])(.*)$")
 
 
 def segment_command(tokens):
-    """剝掉 env assignment、分組語法與 command prefix，回傳 (name, remaining)。"""
+    """剝掉 env assignment、分組語法、重導向與 command prefix，回傳 (name, remaining)。"""
     index = 0
+    prefix_options = ""
     while index < len(tokens):
-        token = tokens[index].lstrip(GROUPING_CHARACTERS)
-        if not token:
+        raw = tokens[index]
+        token = raw.lstrip(GROUPING_CHARACTERS)
+        if not token or INPUT_REDIRECTION.match(token) or token.startswith(">"):
+            # 前置重導向不是命令名；其目標由 redirection_targets 另外抽取。
             index += 1
             continue
         if "=" in token and not token.startswith("-"):
             index += 1
             continue
+        if token.startswith("-") and prefix_options is not None and token != "-":
+            # prefix 自己的選項；吃值的選項要連值一起跳過。
+            if any(letter in prefix_options for letter in token[1:]) and "=" not in token:
+                index += 1
+            index += 1
+            continue
         name = PurePosixPath(token).name
         if name in COMMAND_PREFIXES:
+            prefix_options = COMMAND_PREFIXES[name]
             index += 1
             continue
         return name, tokens[index + 1:]
@@ -220,30 +244,40 @@ def read_targets(shell_command, root):
     reader 全部誤判。shell 是開放式的，這是 best-effort，不是安全邊界。
     """
     targets = []
-    cwd = root
-    # 換行在 shell 裡也是 command separator，漏掉它就會讓整段多行命令只被當成一個 segment。
-    for segment in re.split(r"[|;&\n\r]+|\$\(|\)|`", shell_command):
-        name, tokens = segment_command(split_tokens(segment))
-        if name is None:
-            continue
-        # 輸入重導向讓任何命令都讀得到檔案，與命令是不是 reader 無關。
+    # cd 可能失敗，shell 會留在原目錄，所以候選 cwd 是一組而不是一個。
+    cwds = [root]
+    # 換行在 shell 裡也是 command separator；<( 與 >( 是 process substitution，
+    # 其括號內是另一個完整命令，與 $( 一樣要當成獨立 segment。
+    for segment in re.split(r"[|;&\n\r]+|[<>]\(|\$\(|\)|`", shell_command):
+        tokens = split_tokens(segment)
+        # 重導向可能出現在命令名之前（<file cat），所以掃整個 segment。
+        # 重導向讓任何命令都讀得到檔案，與命令是不是 reader 無關。
         arguments = redirection_targets(tokens)
+        name, remaining = segment_command(tokens)
         if name in CD_COMMANDS:
-            destinations = path_operands(name, tokens)
+            destinations = path_operands(name, remaining)
             opaque = not destinations or destinations[0] == "-" or any(
                 character in destinations[0] for character in OPAQUE_CD_ARGUMENT
             )
-            cwd = root if opaque else cwd / destinations[0]
+            if opaque:
+                cwds = [root]
+            else:
+                cwds = ([root] if root in cwds else []) + [
+                    candidate / destinations[0] for candidate in cwds
+                ]
+                cwds = cwds[-CWD_CANDIDATE_LIMIT:]
         elif name in READ_COMMANDS:
-            arguments += path_operands(name, tokens)
+            arguments += path_operands(name, remaining)
         if not arguments and name in SEARCH_READERS:
             # rg／grep 不帶路徑時遞迴搜尋 cwd，那就是這次搜尋的 scope。
             arguments = ["."]
         for argument in arguments:
             if Path(argument).is_absolute():
                 targets.append(argument)
-            else:
-                targets.append(os.path.normpath(str(cwd / argument)))
+                continue
+            targets.extend(
+                os.path.normpath(str(candidate / argument)) for candidate in cwds
+            )
     return targets
 
 

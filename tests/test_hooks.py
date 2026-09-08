@@ -1305,6 +1305,50 @@ class HookTests(unittest.TestCase):
             )
             self.assertEqual(allowed.returncode, 0, allowed.stderr)
 
+    def test_bash_guard_handles_shell_forms_that_reach_the_isolated_side(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            base = Path(tmp)
+            write_policy(base, implementation_roots=["app"], test_roots=["checks"])
+            (base / "app").mkdir()
+            (base / "checks").mkdir()
+            (base / ".vdd" / "phase").write_text("RED_VERIFIED")
+
+            for command in (
+                # prefix 自己的選項會變成表面上的命令名
+                "command -p cat checks/test_a.py",
+                "time -p cat checks/test_a.py",
+                "nice -n 10 cat checks/test_a.py",
+                # <> 是讀寫重導向，一樣讀得到
+                "cat <>checks/test_a.py",
+                # cd 失敗時 shell 留在原目錄，|| 分支從 root 執行
+                "cd missing || cat checks/test_a.py",
+                # process substitution 的括號內是另一個完整命令
+                "diff <(cat checks/test_a.py) /dev/null",
+                # 重導向可以出現在命令名之前
+                "<checks/test_a.py cat",
+                "exec <checks/test_a.py; cat",
+            ):
+                with self.subTest(blocked=command):
+                    result = run_hook(
+                        ".claude/hooks/bash_guard.py",
+                        base,
+                        {"tool_input": {"command": command}},
+                    )
+                    self.assertEqual(result.returncode, 2, result.stderr)
+
+            for command in (
+                "cd app && cat login.py",
+                "diff <(cat app/login.py) /dev/null",
+                "nice -n 10 cat app/login.py",
+            ):
+                with self.subTest(allowed=command):
+                    result = run_hook(
+                        ".claude/hooks/bash_guard.py",
+                        base,
+                        {"tool_input": {"command": command}},
+                    )
+                    self.assertEqual(result.returncode, 0, result.stderr)
+
     def test_setup_protocol_documents_the_read_side_guard(self):
         protocol = (ROOT / "setup" / "AGENT_SETUP_PROTOCOL.md").read_text()
 
